@@ -1,0 +1,79 @@
+name: Maoyan Cinema Radar Monitor
+
+on:
+  repository_dispatch:
+    types: [cron-tick]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode: tick | refresh_catalog | test_push"
+        required: false
+        default: "tick"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: maoyan-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+
+      - name: Install dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Restore previous snapshot from data branch
+        run: |
+          mkdir -p data_work
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch origin data --depth=1
+            git show origin/data:state.json > data_work/state.json || true
+          fi
+
+      - name: Run monitor
+        env:
+          RUN_MODE: ${{ inputs.mode || github.event.client_payload.mode || 'tick' }}
+          STATE_OUT_PATH: data_work/state.json
+          RADAR_GIST_ID: ${{ secrets.RADAR_GIST_ID }}
+          RADAR_GH_TOKEN: ${{ secrets.RADAR_GH_TOKEN }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+          MAOYAN_COOKIE: ${{ secrets.MAOYAN_COOKIE }}
+          PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: node scripts/monitor.mjs
+
+      - name: Publish single-commit snapshot to orphan data branch
+        if: ${{ (inputs.mode || github.event.client_payload.mode || 'tick') != 'test_push' }}
+        run: |
+          if [ -f data_work/state.json ]; then
+            mkdir -p /tmp/data-branch
+            cp data_work/state.json /tmp/data-branch/state.json
+            cd /tmp/data-branch
+            git init -b data
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore(data): update radar snapshot"
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git push --force origin data
+          fi

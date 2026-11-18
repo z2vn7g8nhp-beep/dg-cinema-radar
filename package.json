@@ -1,0 +1,22 @@
+{
+  "name": "dg-cinema-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dongguan 3-cinema Maoyan ticket release wave monitor & cross-platform PWA alert radar (iPhone & Huawei adapted).",
+  "scripts": {
+    "test": "node --test scripts/test/*.test.mjs",
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "gen:vapid": "node scripts/gen-vapid.mjs",
+    "monitor": "node scripts/monitor.mjs"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "libsodium-wrappers": "^0.8.4"
+  }
+}

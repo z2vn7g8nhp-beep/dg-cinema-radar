@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+PAIR_URL.txt
+web/icons/*.png
+!web/icons/.gitkeep
+*.log
+.DS_Store

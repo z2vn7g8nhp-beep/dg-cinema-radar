@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#070b14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="影院雷达" />
+  <title>东莞三影院开票雷达</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div id="brandDot" class="brand-dot"></div>
+        <div style="min-width:0">
+          <div class="brand-title">东莞三影院开票雷达</div>
+          <div id="subMeta" class="brand-sub">加载状态中...</div>
+        </div>
+      </div>
+      <div class="row" style="flex-wrap:nowrap">
+        <span id="statusPill" class="status-pill">检查中</span>
+      </div>
+    </header>
+
+    <div id="deviceBanner" class="banner hidden"></div>
+    <div id="riskBanner" class="banner danger hidden"></div>
+
+    <main id="mainContent"></main>
+  </div>
+
+  <nav class="bottom-nav" aria-label="主导航">
+    <div class="bottom-nav-inner">
+      <button class="nav-btn active" data-tab="radar" type="button">
+        <span class="nav-icon">📡</span>
+        <span>盯票雷达</span>
+      </button>
+      <button class="nav-btn" data-tab="cinemas" type="button">
+        <span class="nav-icon">🎬</span>
+        <span>三家影院</span>
+      </button>
+      <button class="nav-btn" data-tab="catalog" type="button">
+        <span class="nav-icon">🍿</span>
+        <span>新片片单</span>
+      </button>
+      <button class="nav-btn" data-tab="settings" type="button">
+        <span class="nav-icon">🔔</span>
+        <span>提醒与设置</span>
+      </button>
+    </div>
+  </nav>
+
+  <div id="modalRoot" class="modal-backdrop hidden"></div>
+  <div id="toastRoot" class="toast hidden"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
