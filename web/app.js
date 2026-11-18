@@ -21,6 +21,7 @@ const appState = {
   activeCinemaId: 1485,
   activeDateFilter: 'all',
   specialHallOnly: false,
+  expandedCinemaMovies: new Set(),
   catalogTab: 'coming',
   catalogSearch: '',
   dynamicsFilter: 'all',
@@ -245,6 +246,11 @@ function resolveMovieReleaseDate(movie, intel = {}) {
   const pubMatch = String(intel.pubDesc || '').match(/(\d{4}-\d{2}-\d{2})/);
   if (pubMatch) return pubMatch[1];
 
+  const ymdZhMatch = `${movie.comingTitle || ''} ${intel.pubDesc || ''}`.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+  if (ymdZhMatch) {
+    return `${ymdZhMatch[1]}-${String(Number(ymdZhMatch[2])).padStart(2, '0')}-${String(Number(ymdZhMatch[3])).padStart(2, '0')}`;
+  }
+
   const mdMatch = `${movie.comingTitle || ''} ${movie.showInfo || ''}`.match(/(\d{1,2})月(\d{1,2})日/);
   if (mdMatch) {
     const today = getBeijingTodayStr();
@@ -260,6 +266,45 @@ function resolveMovieReleaseDate(movie, intel = {}) {
     return '2026-12-16';
   }
   return '';
+}
+
+function diffBeijingDays(fromDateStr, toDateStr) {
+  const t1 = new Date(`${fromDateStr}T00:00:00+08:00`).getTime();
+  const t2 = new Date(`${toDateStr}T00:00:00+08:00`).getTime();
+  return Math.round((t2 - t1) / 86400000);
+}
+
+function formatComingChapterMeta(dateStr, rawComingTitle = '') {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return { sortKey: '9999-99-99', title: '待定档期', sub: '高期待 · 即将定档', isSoon: false };
+  }
+  const today = getBeijingTodayStr();
+  const d = diffBeijingDays(today, dateStr);
+  const curYear = today.slice(0, 4);
+  const year = dateStr.slice(0, 4);
+  const m = Number(dateStr.slice(5, 7));
+  const day = Number(dateStr.slice(8, 10));
+  const weekIdx = new Date(`${dateStr}T12:00:00+08:00`).getDay();
+  const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][weekIdx] || '';
+
+  const title = year !== curYear ? `${year}年${m}月${day}日` : `${m}月${day}日`;
+  let rel = '';
+  let isSoon = false;
+  if (d === 0) {
+    rel = '今日上映';
+    isSoon = true;
+  } else if (d === 1) {
+    rel = '明天上映';
+    isSoon = true;
+  } else if (d === 2) {
+    rel = '后天上映';
+    isSoon = true;
+  } else if (d > 2 && d <= 7) {
+    rel = `${d}天后`;
+    isSoon = true;
+  }
+  const sub = [weekday, rel].filter(Boolean).join(' · ');
+  return { sortKey: dateStr, title, sub: sub || rawComingTitle || '', isSoon };
 }
 
 function resolveHeroMovie() {
@@ -1306,12 +1351,7 @@ function renderTopStatus() {
   const riskEl = document.getElementById('riskBanner');
 
   const headingMap = {
-    catalog: {
-      coming: '新片待映',
-      onInfo: '正在热映',
-      wish_total: '想看总榜',
-      wish_daily: '今日飙升'
-    }[appState.catalogTab] || '新片待映',
+    catalog: appState.catalogTab === 'onInfo' ? '正在热映' : '新片',
     cinemas: '东莞三影院',
     radar: '我的盯票',
     dynamics: '全网动态',
@@ -1323,6 +1363,12 @@ function renderTopStatus() {
   const lastTick = pub?.lastTickAt ? formatRelTime(pub.lastTickAt) : '尚未触发';
 
   if (subText) subText.textContent = `东莞三影院 · ${lastTick}更新`;
+  if (pill) {
+    pill.onclick = () => {
+      appState.tab = 'radar';
+      render();
+    };
+  }
 
   if (pub?.riskControl?.active) {
     dot.className = 'brand-dot cooldown';
@@ -1600,6 +1646,10 @@ function renderCinemasTab(root) {
                       (w.keyword && m.nm.toLowerCase().includes(w.keyword.toLowerCase())))
                 );
 
+                const isExpanded = appState.expandedCinemaMovies.has(Number(m.id));
+                const showLimit = 6;
+                const visibleShows = isExpanded ? filteredShows : filteredShows.slice(0, showLimit);
+
                 return `
                   <div class="movie-row">
                     <div class="poster-wrap open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
@@ -1610,32 +1660,41 @@ function renderCinemasTab(root) {
                       }
                     </div>
                     <div class="movie-meta">
-                      <div class="movie-head">
-                        <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
-                        <button class="star-pill ${isStarred ? 'starred' : ''} star-movie-btn"
-                          data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
-                        </button>
+                      <div>
+                        <div class="movie-head">
+                          <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
+                          <button class="star-icon-btn ${isStarred ? 'starred' : ''} star-movie-btn"
+                            data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" title="${isStarred ? '调整星标' : '星标盯票'}" aria-label="${isStarred ? '调整星标' : '星标盯票'}" type="button">
+                            ${icon(isStarred ? 'starFill' : 'star')}
+                          </button>
+                        </div>
+                        <div class="movie-subline">${escapeHtml(m.desc || '')}</div>
                       </div>
-                      <div class="movie-subline">${escapeHtml(m.desc || '')}</div>
-                      <div class="showtime-grid">
-                        ${filteredShows
-                          .slice(0, 18)
-                          .map(
-                            (s) => `
-                          <div class="showtime-box ${s.isImaxGt ? 'gt' : s.isSpecial ? 'special' : ''}">
-                            <div class="showtime-top">
-                              <span class="showtime-tm">${escapeHtml(s.tm)}</span>
-                              <span class="showtime-dt">${escapeHtml(s.dt.slice(5))}</span>
+                      <div>
+                        <div class="showtime-grid">
+                          ${visibleShows
+                            .map(
+                              (s) => `
+                            <div class="showtime-box ${s.isImaxGt ? 'gt' : s.isSpecial ? 'special' : ''}">
+                              <div class="showtime-top">
+                                <span class="showtime-tm">${escapeHtml(s.tm)}</span>
+                                <span class="showtime-dt">${escapeHtml(s.dt.slice(5))}</span>
+                              </div>
+                              <div class="showtime-tag">${s.tags?.length ? escapeHtml(s.tags[0]) : escapeHtml(s.tp || '普通')}</div>
+                              <div class="showtime-hall">${escapeHtml(s.th)}</div>
                             </div>
-                            <div class="showtime-tag">${s.tags?.length ? escapeHtml(s.tags[0]) : escapeHtml(s.tp || '普通')}</div>
-                            <div class="showtime-hall">${escapeHtml(s.th)}</div>
-                          </div>
-                        `
-                          )
-                          .join('')}
+                          `
+                            )
+                            .join('')}
+                        </div>
+                        ${
+                          filteredShows.length > showLimit
+                            ? `<button class="showtime-more-btn toggle-shows-btn" data-expand-mid="${m.id}" type="button">
+                                ${isExpanded ? `收起场次` : `查看全部 ${filteredShows.length} 场`} ${icon('chevronDown')}
+                              </button>`
+                            : ''
+                        }
                       </div>
-                      ${filteredShows.length > 18 ? `<div class="muted" style="margin-top:6px">仅展示前 18 场，共 ${filteredShows.length} 场</div>` : ''}
                     </div>
                   </div>
                 `;
@@ -1661,6 +1720,14 @@ function renderCinemasTab(root) {
     appState.specialHallOnly = !appState.specialHallOnly;
     render();
   };
+  root.querySelectorAll('.toggle-shows-btn').forEach((btn) => {
+    btn.onclick = () => {
+      const mid = Number(btn.dataset.expandMid);
+      if (appState.expandedCinemaMovies.has(mid)) appState.expandedCinemaMovies.delete(mid);
+      else appState.expandedCinemaMovies.add(mid);
+      render();
+    };
+  });
   root.querySelectorAll('.star-movie-btn').forEach((btn) => {
     btn.onclick = () =>
       openStarModal({
@@ -1728,9 +1795,9 @@ function renderDynamicsTab(root) {
                           <span class="dyn-badge ${escapeHtml(d.type)}">${escapeHtml(d.typeLabel)}</span>
                           <span class="movie-name open-detail-trigger" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">${escapeHtml(d.title)}</span>
                         </div>
-                        <button class="star-pill ${isStarred ? 'starred' : ''} star-dyn-btn"
-                          data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}" type="button">
-                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
+                        <button class="star-icon-btn ${isStarred ? 'starred' : ''} star-dyn-btn"
+                          data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}" title="${isStarred ? '调整星标' : '星标盯票'}" aria-label="${isStarred ? '调整星标' : '星标盯票'}" type="button">
+                          ${icon(isStarred ? 'starFill' : 'star')}
                         </button>
                       </div>
                       <div style="margin-top:5px;font-size:13px;font-weight:600;color:var(--ink)">${escapeHtml(d.summary)}</div>
@@ -1785,28 +1852,100 @@ function renderCatalogTab(root) {
   const intelMap = appState.publicState?.intel || {};
   const comingList = cat.coming || [];
   const onInfoList = cat.onInfo || [];
+  const activeMode = appState.catalogTab === 'onInfo' ? 'onInfo' : 'coming';
+  const watchlist = getEffectiveWatchlist();
 
-  let list = [];
-  if (appState.catalogTab === 'coming') {
-    list = comingList;
-  } else if (appState.catalogTab === 'onInfo') {
-    list = onInfoList;
-  } else if (appState.catalogTab === 'wish_total') {
-    list = [...getAllCatalogMovies()].sort((a, b) => Number(b.wish || 0) - Number(a.wish || 0));
-  } else {
-    list = [...getAllCatalogMovies()].sort((a, b) => {
+  const isMovieStarred = (m) =>
+    watchlist.some(
+      (w) =>
+        w.active !== false &&
+        ((w.movieId && Number(w.movieId) === Number(m.id)) ||
+          (w.keyword && String(m.nm || '').toLowerCase().includes(w.keyword.toLowerCase())))
+    );
+
+  // Rising Surge Rail: top 15 by daily Maoyan wish growth across catalog (right under Countdown)
+  const risingMovies = [...getAllCatalogMovies()]
+    .sort((a, b) => {
       const diff = Number(b.wishDailyGain || 0) - Number(a.wishDailyGain || 0);
       return diff !== 0 ? diff : Number(b.wish || 0) - Number(a.wish || 0);
-    });
-  }
+    })
+    .slice(0, 15);
 
-  const watchlist = getEffectiveWatchlist();
-  const isRankMode = appState.catalogTab === 'wish_total' || appState.catalogTab === 'wish_daily';
+  const renderEditorialMovieRow = (m) => {
+    const isStarred = isMovieStarred(m);
+    const hasImax = /imax/i.test(m.version || '');
+    const intel = intelMap[String(m.id)] || {};
+    const maoyanSc = Number(intel.maoyanScore || m.sc || 0);
+    const isPresale = activeMode === 'coming' && /预售|购票/.test(m.statusLabel || '');
+    const scoreBits = [
+      maoyanSc > 0 ? `猫眼 ${maoyanSc}` : '',
+      intel.doubanScore > 0 ? `豆瓣 ${intel.doubanScore}` : '',
+      intel.imdbScore > 0 ? `IMDb ${intel.imdbScore}` : '',
+      intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `烂番茄 ${intel.rtCriticsScore}%` : ''
+    ].filter(Boolean);
+    const shortGenres = intel.cat
+      ? String(intel.cat).split(/[,，/\s]+/).filter(Boolean).slice(0, 2).join(' · ')
+      : '';
+    const shortCast = m.star
+      ? String(m.star).split(/[,，、]+/).filter(Boolean).slice(0, 2).join('、')
+      : '';
+    const subMetaLine = [
+      shortCast,
+      shortGenres,
+      activeMode === 'onInfo' && !shortGenres ? m.showInfo || '' : ''
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    return `
+      <div class="movie-row">
+        <div class="poster-wrap open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
+          ${
+            m.img
+              ? `<img class="poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
+              : `<div class="poster-placeholder">${icon('film')}</div>`
+          }
+          ${hasImax ? `<span class="poster-corner-tag">IMAX</span>` : ''}
+        </div>
+        <div class="movie-meta">
+          <div>
+            <div class="movie-head">
+              <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
+              <button class="star-icon-btn ${isStarred ? 'starred' : ''} star-cat-btn"
+                data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" title="${isStarred ? '调整星标' : '星标盯票'}" aria-label="${isStarred ? '调整星标' : '星标盯票'}" type="button">
+                ${icon(isStarred ? 'starFill' : 'star')}
+              </button>
+            </div>
+            ${subMetaLine ? `<div class="movie-subline">${escapeHtml(subMetaLine)}</div>` : ''}
+          </div>
+          <div class="movie-bottom">
+            <div class="movie-wishline">
+              ${isPresale ? `<span class="presale-dot">预售</span>` : ''}
+              ${
+                activeMode === 'onInfo' && maoyanSc > 0
+                  ? `<span class="score-accent">猫眼 ${maoyanSc}</span>`
+                  : ''
+              }
+              <span>想看 <span class="wish-strong">${formatWishCount(m.wish)}</span></span>
+              ${Number(m.wishDailyGain || 0) > 0 ? `<span class="gain-text">+${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
+              ${intel.tppWish > 0 ? `<span class="muted">· 淘 ${formatWishCount(intel.tppWish)}</span>` : ''}
+            </div>
+            ${
+              scoreBits.length > 0 && !(activeMode === 'onInfo' && scoreBits.length === 1 && maoyanSc > 0)
+                ? `<div class="movie-scoreline"><span class="score-accent">${escapeHtml(scoreBits[0])}</span>${scoreBits.length > 1 ? ` · ${escapeHtml(scoreBits.slice(1).join(' · '))}` : ''}</div>`
+                : ''
+            }
+          </div>
+        </div>
+      </div>
+    `;
+  };
 
   const buildCatalogListHtml = () => {
+    const baseList = activeMode === 'onInfo' ? onInfoList : comingList;
     const kw = appState.catalogSearch.trim().toLowerCase();
     const filtered = kw
-      ? list.filter((m) => {
+      ? baseList.filter((m) => {
           const mEnm = String(intelMap[String(m.id)]?.enm || '').toLowerCase();
           const mStar = String(m.star || '').toLowerCase();
           return (
@@ -1815,89 +1954,58 @@ function renderCatalogTab(root) {
             mStar.includes(kw)
           );
         })
-      : list;
+      : baseList;
 
     if (filtered.length === 0) {
       return `<div class="sheet sheet-pad"><div class="muted">暂无匹配影片。你也可以切到「盯票」直接输入关键词追踪未收录新片。</div></div>`;
     }
 
-    return `<div class="sheet">
-      ${filtered
-        .map((m, idx) => {
-          const isStarred = watchlist.some(
-            (w) => w.active !== false && Number(w.movieId) === Number(m.id)
-          );
-          const hasImax = /imax/i.test(m.version || '');
-          const intel = intelMap[String(m.id)] || {};
-          const maoyanSc = Number(intel.maoyanScore || m.sc || 0);
-          const scoreBits = [
-            maoyanSc > 0 ? `猫眼 ${maoyanSc}` : '',
-            intel.doubanScore > 0 ? `豆瓣 ${intel.doubanScore}` : '',
-            intel.imdbScore > 0 ? `IMDb ${intel.imdbScore}` : '',
-            intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `烂番茄 ${intel.rtCriticsScore}%` : ''
-          ].filter(Boolean);
-          const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
-          const shortGenres = intel.cat
-            ? String(intel.cat).split(/[,，/\s]+/).filter(Boolean).slice(0, 2).join('/')
-            : '';
-          const shortCast = m.star
-            ? String(m.star).split(/[,，、]+/).filter(Boolean).slice(0, 2).join('、')
-            : '';
-          const subMetaLine = [
-            m.rt || m.comingTitle || m.statusLabel || '',
-            hasImax ? 'IMAX' : '',
-            shortGenres,
-            shortCast
-          ]
-            .filter(Boolean)
-            .join(' · ');
+    if (activeMode === 'onInfo') {
+      return `<div class="sheet">${filtered.map(renderEditorialMovieRow).join('')}</div>`;
+    }
 
-          return `
-            <div class="movie-row">
-              <div class="poster-wrap open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
-                ${isRankMode ? `<span class="rank-corner ${rankClass}">${String(idx + 1).padStart(2, '0')}</span>` : ''}
-                ${
-                  m.img
-                    ? `<img class="poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
-                    : `<div class="poster-placeholder">${icon('film')}</div>`
-                }
+    // Group Coming movies chronologically by editorial release date chapters
+    const chaptersMap = new Map();
+    for (const m of filtered) {
+      const intel = intelMap[String(m.id)] || {};
+      const dateStr = /^\d{4}-\d{2}-\d{2}$/.test(String(m.rt || '').trim())
+        ? String(m.rt).trim()
+        : resolveMovieReleaseDate(
+            m.id === DEFAULT_COUNTDOWN_MOVIE_ID ? m : { ...m, customIgnore: true },
+            intel
+          );
+      const cleanDate = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : '';
+      const meta = formatComingChapterMeta(cleanDate, m.comingTitle || '');
+      if (!chaptersMap.has(meta.sortKey)) {
+        chaptersMap.set(meta.sortKey, { ...meta, movies: [] });
+      }
+      chaptersMap.get(meta.sortKey).movies.push(m);
+    }
+
+    const chapters = Array.from(chaptersMap.values()).sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    return chapters
+      .map((ch) => {
+        const sortedMovies = [...ch.movies].sort((a, b) => Number(b.wish || 0) - Number(a.wish || 0));
+        return `
+          <section class="date-chapter">
+            <div class="chapter-header">
+              <div class="chapter-title-group">
+                <span class="chapter-date">${escapeHtml(ch.title)}</span>
+                ${ch.sub ? `<span class="chapter-day ${ch.isSoon ? 'soon' : ''}">${escapeHtml(ch.sub)}</span>` : ''}
               </div>
-              <div class="movie-meta">
-                <div class="movie-head">
-                  <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
-                  <button class="star-pill ${isStarred ? 'starred' : ''} star-cat-btn"
-                    data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                    ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
-                  </button>
-                </div>
-                <div class="movie-subline">${escapeHtml(subMetaLine)}</div>
-                <div class="movie-wishline">
-                  <span>猫眼 ${formatWishCount(m.wish)}</span>
-                  ${Number(m.wishDailyGain || 0) > 0 ? `<span class="gain-text">+${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
-                  ${intel.tppWish > 0 ? `<span class="muted">· 淘票票 ${formatWishCount(intel.tppWish)}</span>` : ''}
-                </div>
-                ${
-                  scoreBits.length > 0
-                    ? `<div class="movie-scoreline"><span class="score-accent">${escapeHtml(scoreBits[0])}</span>${scoreBits.length > 1 ? ` · ${escapeHtml(scoreBits.slice(1).join(' · '))}` : ''}</div>`
-                    : ''
-                }
-              </div>
+              <span class="chapter-count">${sortedMovies.length} 部</span>
             </div>
-          `;
-        })
-        .join('')}
-    </div>`;
+            <div class="sheet">${sortedMovies.map(renderEditorialMovieRow).join('')}</div>
+          </section>
+        `;
+      })
+      .join('');
   };
 
   const { movie: heroMovie, intel: heroIntel, releaseDateStr: heroDate } = resolveHeroMovie();
   const heroCd = computeCountdownParts(heroDate);
   const pad = (n) => String(n).padStart(2, '0');
-  const heroStarred = watchlist.some(
-    (w) =>
-      w.active !== false &&
-      ((w.movieId && Number(w.movieId) === Number(heroMovie.id)) ||
-        (w.keyword && String(heroMovie.nm || '').toLowerCase().includes(w.keyword.toLowerCase())))
-  );
+  const heroStarred = isMovieStarred(heroMovie);
   const heroDateCaption = heroDate
     ? `${heroDate.replace(/-/g, '.')}${heroMovie.comingTitle ? ` · ${heroMovie.comingTitle}` : ''}`
     : heroMovie.comingTitle || '尚未定具体档期';
@@ -1930,7 +2038,7 @@ function renderCatalogTab(root) {
         ${
           heroMovie.img
             ? `<img class="hero-poster-thumb open-detail-trigger" data-mid="${heroMovie.id}" data-title="${escapeHtml(heroMovie.nm)}" data-poster="${escapeHtml(heroMovie.img)}" src="${escapeHtml(heroMovie.img)}" alt="" />`
-            : `<div class="poster-placeholder" style="width:74px;height:106px;background:rgba(255,255,255,0.1);color:#fff">${icon('film')}</div>`
+            : `<div class="poster-placeholder" style="width:78px;height:112px;background:rgba(255,255,255,0.1);color:#fff">${icon('film')}</div>`
         }
         <div class="hero-info">
           <div class="hero-title open-detail-trigger" data-mid="${heroMovie.id}" data-title="${escapeHtml(heroMovie.nm)}" data-poster="${escapeHtml(heroMovie.img || '')}">${escapeHtml(heroMovie.nm)}</div>
@@ -1949,17 +2057,61 @@ function renderCatalogTab(root) {
     </section>
   `;
 
+  const risingRailHtml =
+    risingMovies.length > 0
+      ? `
+        <section class="rising-section">
+          <div class="section-head">
+            <div class="section-h">今日飙升</div>
+            <div class="section-sub">猫眼日增热度 · 横向浏览</div>
+          </div>
+          <div class="rising-rail">
+            ${risingMovies
+              .map((m, idx) => {
+                const rankCls = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+                const starred = isMovieStarred(m);
+                const hasImax = /imax/i.test(m.version || '');
+                const gain = Number(m.wishDailyGain || 0);
+                return `
+                  <article class="rising-card open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
+                    <div class="rising-poster-wrap">
+                      ${
+                        m.img
+                          ? `<img class="rising-poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
+                          : `<div class="poster-placeholder" style="width:100%;height:100%">${icon('film')}</div>`
+                      }
+                      <span class="rising-rank ${rankCls}">${String(idx + 1).padStart(2, '0')}</span>
+                      ${starred ? `<span class="rising-star-dot" title="已星标">${icon('starFill')}</span>` : ''}
+                      ${hasImax ? `<span class="rising-imax-tag">IMAX</span>` : ''}
+                    </div>
+                    <div class="rising-title">${escapeHtml(m.nm)}</div>
+                    <div class="rising-meta">
+                      ${gain > 0 ? `<span class="rising-gain">+${gain.toLocaleString('zh-CN')}</span>` : ''}
+                      <span class="muted">${formatWishCount(m.wish)}</span>
+                    </div>
+                  </article>
+                `;
+              })
+              .join('')}
+          </div>
+        </section>
+      `
+      : '';
+
   root.innerHTML = `
     ${heroHtml}
 
-    <div class="toolbar-bar">
-      <div class="underline-tabs">
-        <button class="u-tab ${appState.catalogTab === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">待映 ${comingList.length}</button>
-        <button class="u-tab ${appState.catalogTab === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">热映 ${onInfoList.length}</button>
-        <button class="u-tab ${appState.catalogTab === 'wish_total' ? 'active' : ''}" data-ctab="wish_total" type="button">想看榜</button>
-        <button class="u-tab ${appState.catalogTab === 'wish_daily' ? 'active' : ''}" data-ctab="wish_daily" type="button">飙升榜</button>
+    ${risingRailHtml}
+
+    <div class="mode-bar">
+      <div class="section-h">${activeMode === 'onInfo' ? '正在热映' : '待映日历'}</div>
+      <div class="mode-actions">
+        <div class="mode-switch">
+          <button class="mode-btn ${activeMode === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">待映 ${comingList.length}</button>
+          <button class="mode-btn ${activeMode === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">热映 ${onInfoList.length}</button>
+        </div>
+        <button class="icon-circle-btn" id="syncCatalogBtn" type="button" title="刷新片单">${icon('refresh')}</button>
       </div>
-      <button class="icon-circle-btn" id="syncCatalogBtn" type="button" title="刷新片单">${icon('refresh')}</button>
     </div>
 
     <div class="search-wrap">
@@ -2006,7 +2158,7 @@ function renderCatalogTab(root) {
       poster: heroMovie.img || ''
     });
 
-  root.querySelectorAll('.countdown-hero .open-detail-trigger').forEach((el) => {
+  root.querySelectorAll('.countdown-hero .open-detail-trigger, .rising-rail .open-detail-trigger').forEach((el) => {
     el.onclick = () =>
       openMovieDetailModal({
         movieId: el.dataset.mid ? Number(el.dataset.mid) : null,
