@@ -604,8 +604,10 @@ export async function fetchRottenTomatoesIntel({
  * Uses bilingual Chinese+English queries plus year & director/cast cross-checks to prevent false platform matches.
  */
 export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omdbApiKey = '', tppMatch = null, fetchImpl = fetch } = {}) {
-  const isV2 = prevIntel?.matchVersion === INTEL_MATCH_VERSION;
-  const basePrev = isV2 ? prevIntel : {};
+  const isCurrent = prevIntel?.matchVersion === INTEL_MATCH_VERSION;
+  const basePrev = isCurrent ? prevIntel : {};
+  // Keep already-verified Douban ID/score passed from monitor.mjs while re-verifying IMDb/RT under v3
+  const doubanPrev = isCurrent || prevIntel?.doubanId ? prevIntel : {};
   const tppEnm = tppMatch?.showNameEn && hasLatinLetters(tppMatch.showNameEn) ? tppMatch.showNameEn : '';
 
   const next = {
@@ -619,14 +621,14 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     pubDesc: prevIntel.pubDesc || '',
     maoyanScore: Number(movie.sc || prevIntel.maoyanScore || 0) || null,
     maoyanVotes: prevIntel.maoyanVotes || 0,
-    doubanId: basePrev.doubanId || '',
-    doubanUrl: basePrev.doubanUrl || '',
-    doubanScore: basePrev.doubanScore ?? null,
-    doubanVotes: basePrev.doubanVotes || 0,
-    doubanYear: basePrev.doubanYear ?? null,
-    doubanAka: Array.isArray(basePrev.doubanAka) ? basePrev.doubanAka : [],
-    doubanZhAka: Array.isArray(basePrev.doubanZhAka) ? basePrev.doubanZhAka : [],
-    doubanMetaLoaded: Boolean(basePrev.doubanMetaLoaded),
+    doubanId: doubanPrev.doubanId || '',
+    doubanUrl: doubanPrev.doubanUrl || '',
+    doubanScore: doubanPrev.doubanScore ?? null,
+    doubanVotes: doubanPrev.doubanVotes || 0,
+    doubanYear: doubanPrev.doubanYear ?? null,
+    doubanAka: Array.isArray(doubanPrev.doubanAka) ? doubanPrev.doubanAka : [],
+    doubanZhAka: Array.isArray(doubanPrev.doubanZhAka) ? doubanPrev.doubanZhAka : [],
+    doubanMetaLoaded: Boolean(doubanPrev.doubanMetaLoaded),
     imdbId: basePrev.imdbId || '',
     imdbUrl: basePrev.imdbUrl || '',
     imdbScore: basePrev.imdbScore ?? null,

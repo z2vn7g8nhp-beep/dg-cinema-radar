@@ -407,6 +407,7 @@ async function main() {
         } else {
           // Keep verified Maoyan & Douban metadata while re-verifying IMDb/RT under strict v3 bilingual Pinyin rules
           prunedIntel[k] = {
+            matchVersion: Number(v.matchVersion || 1),
             movieId: v.movieId || Number(k),
             enm: v.enm || '',
             cat: v.cat || '',
@@ -459,7 +460,7 @@ async function main() {
       }
 
       // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within 5-min cadence
-      const budget = upgradeCount > 20 ? 40 : (mode === 'refresh_catalog' ? 28 : 20);
+      const budget = upgradeCount > 10 ? 48 : (mode === 'refresh_catalog' ? 28 : 20);
       const toEnrich = selectMoviesForIntelEnrichment({
         catalogMovies: allEnriched,
         intelMap: nextIntelMap,
