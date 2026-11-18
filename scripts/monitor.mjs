@@ -460,7 +460,7 @@ async function main() {
       }
 
       // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within 5-min cadence
-      const budget = upgradeCount > 10 ? 48 : (mode === 'refresh_catalog' ? 28 : 20);
+      const budget = upgradeCount > 10 ? 24 : (mode === 'refresh_catalog' ? 24 : 18);
       const toEnrich = selectMoviesForIntelEnrichment({
         catalogMovies: allEnriched,
         intelMap: nextIntelMap,
@@ -481,16 +481,20 @@ async function main() {
         });
       }
 
-      // Scrub stale historical `scored` dynamics whose movie score was invalidated by stricter v3 matching
-      if (recheckedIds.size > 0) {
+      // Scrub stale historical `scored` dynamics whose score was invalidated during legacy upgrade
+      if (recheckedIds.size > 0 || upgradeCount > 0) {
         nextDynamics = nextDynamics.filter((d) => {
-          if (d.type !== 'scored' || !recheckedIds.has(Number(d.movieId))) return true;
-          const ci = nextIntelMap[String(d.movieId)];
-          if (!ci) return true;
+          if (d.type !== 'scored') return true;
+          const midStr = String(d.movieId);
+          const ci = nextIntelMap[midStr];
+          const pi = prevIntelMap[midStr];
+          const touchedLegacy = recheckedIds.has(Number(d.movieId)) || Boolean(pi && pi.matchVersion !== INTEL_MATCH_VERSION);
+          if (!touchedLegacy) return true;
+          if (!ci) return false;
           const sum = String(d.summary || '');
           if (/\bIMDb\b/.test(sum) && !(ci.imdbScore > 0)) return false;
           if (/烂番茄/.test(sum) && (ci.rtCriticsScore === null || ci.rtCriticsScore === undefined)) return false;
-          if (/豆瓣/.test(sum) && !(ci.doubanScore > 0)) return false;
+          if (/豆瓣/.test(sum) && !(ci.doubanScore > 0) && recheckedIds.has(Number(d.movieId))) return false;
           return true;
         });
       }
