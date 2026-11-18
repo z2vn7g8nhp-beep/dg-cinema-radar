@@ -1771,7 +1771,7 @@ function renderCatalogTab(root) {
       </div>
       <div class="hero-bottom">
         <div class="hero-wish">
-          猫眼 ${formatWishCount(heroMovie.wish)}${Number(heroMovie.wishDailyGain || 0) > 0 ? ` (+${Number(heroMovie.wishDailyGain).toLocaleString('zh-CN')})` : ''}${heroIntel.tppWish > 0 ? ` · 淘票票 ${formatWishCount(heroIntel.tppWish)}` : ''}
+          <span>猫眼 ${formatWishCount(heroMovie.wish)}${Number(heroMovie.wishDailyGain || 0) > 0 ? ` (+${Number(heroMovie.wishDailyGain).toLocaleString('zh-CN')})` : ''}</span>${heroIntel.tppWish > 0 ? `<span>淘票票 ${formatWishCount(heroIntel.tppWish)}</span>` : ''}
         </div>
         <button class="hero-star-btn ${heroStarred ? 'starred' : ''}" id="heroStarBtn" type="button">
           ${icon(heroStarred ? 'starFill' : 'star')} ${heroStarred ? '已星标' : '盯票'}

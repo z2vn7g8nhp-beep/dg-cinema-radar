@@ -302,15 +302,24 @@ main, .sheet, .movie-row, .movie-meta {
 .hero-wish {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 2px;
   font-size: 12px;
   line-height: 1.35;
   color: rgba(255, 255, 255, 0.82);
-  white-space: normal;
+}
+
+.hero-wish span {
+  white-space: nowrap;
 }
 
 .hero-star-btn {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 5px;
   padding: 6px 13px;
   border-radius: 999px;
