@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dg-radar-shell-v6';
+const CACHE_NAME = 'dg-radar-shell-v7';
 const SHELL_ASSETS = [
   './',
   './index.html',

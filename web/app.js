@@ -7,14 +7,17 @@ const CINEMAS = [
   { id: 26100, shortName: '民盈国贸城 CGV', name: 'CGV影城（民盈·国贸城店）', badge: 'IMAX / 4DX / ScreenX' }
 ];
 
+const DEFAULT_COUNTDOWN_MOVIE_ID = 1474442; // 复仇者联盟5
+
 const STORAGE_KEYS = {
   config: 'dg_radar_config_v1',
   sentinel: 'dg_radar_sentinel_v1',
+  countdown: 'dg_radar_countdown_v1',
   lastSeenAlertId: 'dg_radar_last_alert_id'
 };
 
 const appState = {
-  tab: 'radar',
+  tab: 'catalog',
   activeCinemaId: 1485,
   activeDateFilter: 'all',
   specialHallOnly: false,
@@ -31,10 +34,12 @@ const appState = {
   },
   config: loadConfig(),
   sentinel: loadSentinelConfig(),
+  countdown: loadCountdownConfig(),
   swReg: null,
   pushSub: null,
   wakeLock: null,
   sentinelTimer: null,
+  countdownTimer: null,
   generatedVapid: null,
   pairingFeedback: null,
   incomingWeChatPairLink: '',
@@ -53,7 +58,9 @@ const SVG_ICONS = {
   film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 4v16"/><path d="M17 4v16"/><path d="M3 9h4"/><path d="M3 15h4"/><path d="M17 9h4"/><path d="M17 15h4"/></svg>',
   volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
   send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>',
-  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>'
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>',
+  chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>'
 };
 
 function icon(name) {
@@ -165,6 +172,259 @@ function formatWishCount(n) {
   return num.toLocaleString('zh-CN');
 }
 
+function loadCountdownConfig() {
+  const base = { movieId: DEFAULT_COUNTDOWN_MOVIE_ID, customDates: {} };
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEYS.countdown) || '{}');
+    return {
+      movieId: saved.movieId || DEFAULT_COUNTDOWN_MOVIE_ID,
+      customDates: saved.customDates && typeof saved.customDates === 'object' ? saved.customDates : {}
+    };
+  } catch {
+    return base;
+  }
+}
+
+function saveCountdownConfig(next) {
+  appState.countdown = {
+    ...appState.countdown,
+    ...next,
+    customDates: { ...(appState.countdown.customDates || {}), ...(next.customDates || {}) }
+  };
+  localStorage.setItem(STORAGE_KEYS.countdown, JSON.stringify(appState.countdown));
+}
+
+function getBeijingTodayStr() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function resolveMovieReleaseDate(movie, intel = {}) {
+  if (!movie) return '';
+  const custom = appState.countdown?.customDates?.[String(movie.id)];
+  if (custom && /^\d{4}-\d{2}-\d{2}$/.test(custom)) return custom;
+
+  const rt = String(movie.rt || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rt)) return rt;
+
+  const origRt = String(intel.origRt || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(origRt) && !/重映/.test(intel.pubDesc || movie.nm || '')) return origRt;
+
+  const pubMatch = String(intel.pubDesc || '').match(/(\d{4}-\d{2}-\d{2})/);
+  if (pubMatch) return pubMatch[1];
+
+  const mdMatch = `${movie.comingTitle || ''} ${movie.showInfo || ''}`.match(/(\d{1,2})月(\d{1,2})日/);
+  if (mdMatch) {
+    const today = getBeijingTodayStr();
+    const curYear = Number(today.slice(0, 4));
+    const curMmDd = today.slice(5);
+    const mm = String(Number(mdMatch[1])).padStart(2, '0');
+    const dd = String(Number(mdMatch[2])).padStart(2, '0');
+    const year = `${mm}-${dd}` < curMmDd && movie.source === 'coming' ? curYear + 1 : curYear;
+    return `${year}-${mm}-${dd}`;
+  }
+
+  if (Number(movie.id) === DEFAULT_COUNTDOWN_MOVIE_ID) {
+    return '2026-12-16';
+  }
+  return '';
+}
+
+function resolveHeroMovie() {
+  const all = getAllCatalogMovies();
+  const targetId = Number(appState.countdown?.movieId || DEFAULT_COUNTDOWN_MOVIE_ID);
+  let movie = all.find((m) => Number(m.id) === targetId);
+  if (!movie && targetId === DEFAULT_COUNTDOWN_MOVIE_ID) {
+    movie = all.find((m) => String(m.nm || '').includes('复仇者联盟5'));
+  }
+  if (!movie && all.length > 0 && appState.countdown?.movieId) {
+    movie = all.find((m) => m.source === 'coming') || all[0];
+  }
+  if (!movie) {
+    movie = {
+      id: DEFAULT_COUNTDOWN_MOVIE_ID,
+      nm: '复仇者联盟5',
+      img: 'https://p0.pipi.cn/mediaplus/friday_image_fe/e429586e14d5c24ea925cec2b1ddc37b5d1b1.jpg?imageMogr2/quality/80',
+      rt: '2026-12-16',
+      comingTitle: '12月16日 周三',
+      wish: 0,
+      source: 'coming'
+    };
+  }
+  const intel = appState.publicState?.intel?.[String(movie.id)] || {};
+  const releaseDateStr = resolveMovieReleaseDate(movie, intel);
+  return { movie, intel, releaseDateStr };
+}
+
+function computeCountdownParts(releaseDateStr) {
+  if (!releaseDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(releaseDateStr)) {
+    return { status: 'tbd', days: 0, hours: 0, mins: 0, secs: 0, elapsedDays: 0 };
+  }
+  const targetMs = new Date(`${releaseDateStr}T00:00:00+08:00`).getTime();
+  const diffMs = targetMs - Date.now();
+  if (diffMs > 0) {
+    const totalSec = Math.floor(diffMs / 1000);
+    const days = Math.floor(totalSec / 86400);
+    const hours = Math.floor((totalSec % 86400) / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    return { status: 'future', days, hours, mins, secs, elapsedDays: 0 };
+  }
+  const todayStr = getBeijingTodayStr();
+  if (releaseDateStr === todayStr) {
+    return { status: 'today', days: 0, hours: 0, mins: 0, secs: 0, elapsedDays: 0 };
+  }
+  const elapsedDays = Math.max(1, Math.floor((Date.now() - targetMs) / 86400000));
+  return { status: 'released', days: 0, hours: 0, mins: 0, secs: 0, elapsedDays };
+}
+
+function updateCountdownDom() {
+  const clockEl = document.getElementById('heroCountdownClock');
+  if (!clockEl) return;
+  const ds = clockEl.dataset.targetDate || '';
+  const parts = computeCountdownParts(ds);
+  if (parts.status !== 'future') return;
+  const pad = (n) => String(n).padStart(2, '0');
+  const dEl = document.getElementById('heroCdDays');
+  const hEl = document.getElementById('heroCdHours');
+  const mEl = document.getElementById('heroCdMins');
+  const sEl = document.getElementById('heroCdSecs');
+  if (dEl) dEl.textContent = String(parts.days);
+  if (hEl) hEl.textContent = pad(parts.hours);
+  if (mEl) mEl.textContent = pad(parts.mins);
+  if (sEl) sEl.textContent = pad(parts.secs);
+}
+
+function startCountdownTicker() {
+  clearInterval(appState.countdownTimer);
+  appState.countdownTimer = setInterval(updateCountdownDom, 1000);
+}
+
+function openCountdownPickerModal() {
+  const root = document.getElementById('modalRoot');
+  const { movie: currentMovie, releaseDateStr: currentDateStr } = resolveHeroMovie();
+  const all = [...getAllCatalogMovies()].sort((a, b) => {
+    if (a.source !== b.source) return a.source === 'coming' ? -1 : 1;
+    return Number(b.wish || 0) - Number(a.wish || 0);
+  });
+
+  let selectedMovie = currentMovie;
+  let searchKw = '';
+
+  const renderPicker = () => {
+    const intelMap = appState.publicState?.intel || {};
+    const filtered = searchKw.trim()
+      ? all.filter((m) => String(m.nm || '').toLowerCase().includes(searchKw.trim().toLowerCase()))
+      : all;
+    const selIntel = intelMap[String(selectedMovie.id)] || {};
+    const resolvedSelDate = resolveMovieReleaseDate(selectedMovie, selIntel);
+
+    root.classList.remove('hidden');
+    root.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-sheet-pad">
+          <div class="row-between" style="margin-bottom:10px">
+            <div class="sheet-title">${icon('calendar')} 选择首页倒计时影片</div>
+            <button class="btn btn-soft btn-sm" id="closePickerBtn" type="button">完成</button>
+          </div>
+
+          <div style="background:var(--bg);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+            <div class="row-between" style="margin-bottom:8px">
+              <strong style="font-size:14px">当前选中：《${escapeHtml(selectedMovie.nm)}》</strong>
+              <button class="btn btn-sm btn-soft" id="resetDefaultCountdownBtn" type="button">默认复联5</button>
+            </div>
+            <div class="row" style="gap:8px">
+              <div style="flex:1">
+                <label class="muted" style="display:block;margin-bottom:4px">目标上映日期（可手动修正或自定）</label>
+                <input id="customCountdownDateInput" type="date" class="input" value="${escapeHtml(resolvedSelDate)}" style="min-height:38px;background:#fff" />
+              </div>
+              <button class="btn btn-primary btn-sm" id="applyCustomDateBtn" style="align-self:flex-end;min-height:38px" type="button">保存日期</button>
+            </div>
+          </div>
+
+          <div class="search-wrap" style="margin-bottom:8px">
+            <span class="search-ico">${icon('search')}</span>
+            <input id="pickerSearchInput" class="input" value="${escapeHtml(searchKw)}" placeholder="搜索片名切换倒计时..." />
+          </div>
+
+          <div style="max-height:42dvh;overflow-y:auto">
+            ${filtered
+              .slice(0, 50)
+              .map((m) => {
+                const isSel = Number(m.id) === Number(selectedMovie.id);
+                const mDate = resolveMovieReleaseDate(m, intelMap[String(m.id)] || {});
+                return `
+                  <div class="picker-row ${isSel ? 'selected' : ''}" data-pick-id="${m.id}">
+                    ${m.img ? `<img class="picker-thumb" src="${escapeHtml(m.img)}" alt="" loading="lazy" />` : `<div class="picker-thumb"></div>`}
+                    <div style="flex:1;min-width:0">
+                      <div style="font-weight:700;font-size:14px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.nm)}</div>
+                      <div class="muted">${mDate ? escapeHtml(mDate) : escapeHtml(m.comingTitle || '待定档')} · 猫眼想看 ${formatWishCount(m.wish)}</div>
+                    </div>
+                    ${isSel ? `<span style="font-size:12px;font-weight:700;color:var(--crimson)">当前</span>` : ''}
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('closePickerBtn').onclick = () => {
+      root.classList.add('hidden');
+      render();
+    };
+    root.onclick = (e) => {
+      if (e.target === root) {
+        root.classList.add('hidden');
+        render();
+      }
+    };
+    document.getElementById('pickerSearchInput').oninput = (e) => {
+      searchKw = e.target.value;
+      renderPicker();
+      const inp = document.getElementById('pickerSearchInput');
+      inp.focus();
+      inp.setSelectionRange(inp.value.length, inp.value.length);
+    };
+    document.getElementById('resetDefaultCountdownBtn').onclick = () => {
+      saveCountdownConfig({ movieId: DEFAULT_COUNTDOWN_MOVIE_ID });
+      selectedMovie = resolveHeroMovie().movie;
+      showToast('已恢复默认倒计时：复仇者联盟5');
+      renderPicker();
+    };
+    document.getElementById('applyCustomDateBtn').onclick = () => {
+      const val = document.getElementById('customCountdownDateInput').value.trim();
+      saveCountdownConfig({
+        movieId: Number(selectedMovie.id),
+        customDates: val ? { [String(selectedMovie.id)]: val } : {}
+      });
+      showToast(val ? `已设定《${selectedMovie.nm}》倒计时目标：${val}` : '已更新倒计时影片');
+      root.classList.add('hidden');
+      render();
+    };
+    root.querySelectorAll('[data-pick-id]').forEach((row) => {
+      row.onclick = () => {
+        const picked = all.find((x) => Number(x.id) === Number(row.dataset.pickId));
+        if (!picked) return;
+        selectedMovie = picked;
+        saveCountdownConfig({ movieId: Number(picked.id) });
+        showToast(`首页倒计时已切换为《${picked.nm}》`);
+        render();
+        renderPicker();
+      };
+    });
+  };
+
+  renderPicker();
+}
+
 function getAllCatalogMovies() {
   const cat = appState.publicState?.catalog || { onInfo: [], coming: [] };
   const byId = new Map();
@@ -256,46 +516,51 @@ function openMovieDetailModal({ movieId = null, title = '', poster = '' }) {
         </div>
 
         <div class="section-label">四平台开分</div>
-        <div class="score-grid">
-          <div class="metric-box">
-            <div class="metric-label"><span>猫眼评分</span></div>
-            <div class="metric-val" style="color:${maoyanScore > 0 ? 'var(--gold)' : 'var(--text-muted)'}">${maoyanScore > 0 ? maoyanScore : '未开分'}</div>
-            <div class="metric-sub">${intel.maoyanVotes ? `${formatWishCount(intel.maoyanVotes)} 人评` : '官方评分'}</div>
+        <div class="score-strip">
+          <div class="score-cell">
+            <div class="score-cell-lbl">猫眼</div>
+            <div class="score-cell-val" style="color:${maoyanScore > 0 ? 'var(--amber)' : 'var(--ink-muted)'}">${maoyanScore > 0 ? maoyanScore : '—'}</div>
+            <div class="score-cell-sub">${maoyanScore > 0 && intel.maoyanVotes ? `${formatWishCount(intel.maoyanVotes)}人` : '未开分'}</div>
           </div>
-          <div class="metric-box">
-            <div class="metric-label"><span>豆瓣评分</span>${intel.doubanUrl ? `<a class="link-clean" href="${escapeHtml(intel.doubanUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
-            <div class="metric-val" style="color:${intel.doubanScore > 0 ? 'var(--green)' : 'var(--text-muted)'}">${intel.doubanScore > 0 ? intel.doubanScore : '未开分'}</div>
-            <div class="metric-sub">${intel.doubanVotes ? `${formatWishCount(intel.doubanVotes)} 人评` : '待抓取或未开分'}</div>
+          <div class="score-cell">
+            <div class="score-cell-lbl">${intel.doubanUrl ? `<a class="link-clean" href="${escapeHtml(intel.doubanUrl)}" target="_blank" rel="noopener">豆瓣↗</a>` : '豆瓣'}</div>
+            <div class="score-cell-val" style="color:${intel.doubanScore > 0 ? 'var(--green)' : 'var(--ink-muted)'}">${intel.doubanScore > 0 ? intel.doubanScore : '—'}</div>
+            <div class="score-cell-sub">${intel.doubanScore > 0 && intel.doubanVotes ? `${formatWishCount(intel.doubanVotes)}人` : '未开分'}</div>
           </div>
-          <div class="metric-box">
-            <div class="metric-label"><span>IMDb</span>${intel.imdbUrl ? `<a class="link-clean" href="${escapeHtml(intel.imdbUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
-            <div class="metric-val" style="color:${intel.imdbScore > 0 ? 'var(--blue)' : 'var(--text-muted)'}">${intel.imdbScore > 0 ? `${intel.imdbScore}` : '未开分'}</div>
-            <div class="metric-sub">${intel.imdbVotes ? `${formatWishCount(intel.imdbVotes)} votes` : (intel.enm ? '待抓取或未开分' : '需英文片名匹配')}</div>
+          <div class="score-cell">
+            <div class="score-cell-lbl">${intel.imdbUrl ? `<a class="link-clean" href="${escapeHtml(intel.imdbUrl)}" target="_blank" rel="noopener">IMDb↗</a>` : 'IMDb'}</div>
+            <div class="score-cell-val" style="color:${intel.imdbScore > 0 ? 'var(--blue)' : 'var(--ink-muted)'}">${intel.imdbScore > 0 ? intel.imdbScore : '—'}</div>
+            <div class="score-cell-sub">${intel.imdbScore > 0 && intel.imdbVotes ? formatWishCount(intel.imdbVotes) : '未开分'}</div>
           </div>
-          <div class="metric-box">
-            <div class="metric-label"><span>烂番茄</span>${intel.rtUrl ? `<a class="link-clean" href="${escapeHtml(intel.rtUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
-            <div class="metric-val" style="color:${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? 'var(--accent)' : 'var(--text-muted)'}">${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `${intel.rtCriticsScore}%` : '未开分'}</div>
-            <div class="metric-sub">${intel.rtAudienceScore !== null && intel.rtAudienceScore !== undefined ? `爆米花 ${intel.rtAudienceScore}%` : '新鲜度 / 爆米花'}</div>
+          <div class="score-cell">
+            <div class="score-cell-lbl">${intel.rtUrl ? `<a class="link-clean" href="${escapeHtml(intel.rtUrl)}" target="_blank" rel="noopener">烂番茄↗</a>` : '烂番茄'}</div>
+            <div class="score-cell-val" style="color:${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? 'var(--crimson)' : 'var(--ink-muted)'}">${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `${intel.rtCriticsScore}%` : '—'}</div>
+            <div class="score-cell-sub">${intel.rtAudienceScore !== null && intel.rtAudienceScore !== undefined ? `爆米花${intel.rtAudienceScore}%` : '新鲜度'}</div>
           </div>
         </div>
 
         <div class="section-label">东莞三家影院当前排片</div>
-        <div class="card-subtle" style="margin-top:6px">
+        <div style="background:var(--bg);border-radius:14px;padding:12px;margin-top:6px">
           ${
             cinemaMatches.length === 0
               ? `<div class="muted">暂未在华南MALL / 东城万达 / 民盈国贸城查到开售排片。</div>`
               : cinemaMatches
                   .map(
                     ({ cinema, movie }) =>
-                      `<div class="muted" style="margin:3px 0;color:var(--text)"><strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场（${(movie.shows || []).slice(0, 3).map((s) => `${s.dt.slice(5)} ${s.tm}${s.tags?.length ? `[${s.tags[0]}]` : ''}`).join('、')}）</div>`
+                      `<div class="muted" style="margin:3px 0;color:var(--ink)"><strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场（${(movie.shows || []).slice(0, 3).map((s) => `${s.dt.slice(5)} ${s.tm}${s.tags?.length ? `[${s.tags[0]}]` : ''}`).join('、')}）</div>`
                   )
                   .join('')
           }
         </div>
 
         <div class="row" style="margin-top:14px">
-          <button class="btn ${isStarred ? 'btn-gold' : 'btn-primary'}" style="flex:1;min-height:44px" id="detailStarActionBtn" type="button">
-            ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '调整星标设置 / 停止提醒' : '星标盯每轮开票'}
+          ${
+            resolvedId
+              ? `<button class="btn btn-soft" style="min-height:44px" id="detailPinCountdownBtn" type="button">${icon('calendar')} 设为倒计时</button>`
+              : ''
+          }
+          <button class="btn ${isStarred ? 'btn-gold' : 'btn-crimson'}" style="flex:1;min-height:44px" id="detailStarActionBtn" type="button">
+            ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '调整星标 / 停止提醒' : '星标盯每轮开票'}
           </button>
         </div>
       </div>
@@ -306,6 +571,12 @@ function openMovieDetailModal({ movieId = null, title = '', poster = '' }) {
   root.onclick = (e) => {
     if (e.target === root) root.classList.add('hidden');
   };
+  document.getElementById('detailPinCountdownBtn')?.addEventListener('click', () => {
+    saveCountdownConfig({ movieId: Number(resolvedId) });
+    root.classList.add('hidden');
+    showToast(`已将首页倒计时设为《${resolvedTitle}》`);
+    render();
+  });
   document.getElementById('detailStarActionBtn').onclick = () => {
     openStarModal({ movieId: resolvedId, title: resolvedTitle, poster: resolvedPoster });
   };
@@ -948,38 +1219,53 @@ function renderDeviceBanner() {
 function renderTopStatus() {
   const pub = appState.publicState;
   const dot = document.getElementById('brandDot');
-  const sub = document.getElementById('subMeta');
+  const heading = document.getElementById('pageHeading');
+  const subText = document.getElementById('subMetaText');
   const pill = document.getElementById('statusPill');
   const riskEl = document.getElementById('riskBanner');
+
+  const headingMap = {
+    catalog: {
+      coming: '新片待映',
+      onInfo: '正在热映',
+      wish_total: '想看总榜',
+      wish_daily: '今日飙升'
+    }[appState.catalogTab] || '新片待映',
+    cinemas: '东莞三影院',
+    radar: '我的盯票',
+    dynamics: '全网动态',
+    settings: '设置与推送'
+  };
+  if (heading) heading.textContent = headingMap[appState.tab] || '影院雷达';
 
   const activeCount = getEffectiveWatchlist().filter((w) => w.active !== false).length;
   const lastTick = pub?.lastTickAt ? formatRelTime(pub.lastTickAt) : '尚未触发';
 
-  sub.textContent = `3家东莞影院 · 最近巡检 ${lastTick} · 星标 ${activeCount} 部`;
+  if (subText) subText.textContent = `东莞三影院 · ${lastTick}更新`;
 
   if (pub?.riskControl?.active) {
     dot.className = 'brand-dot cooldown';
     pill.className = 'status-pill danger';
-    pill.textContent = '风控冷却中';
+    pill.textContent = '风控冷却';
     riskEl.className = 'banner danger';
     riskEl.innerHTML = `
-      <div class="banner-title">⚠️ 猫眼风控自动熔断冷却中</div>
-      <div>原因：${escapeHtml(pub.riskControl.lastReason || '疑似滑块拦截')} · 预计恢复：${escapeHtml(formatRelTime(pub.riskControl.cooldownUntil))}（可在设置里切换「轮转抓1家」降低请求密度）</div>
+      <div class="banner-title">猫眼风控自动熔断冷却中</div>
+      <div>原因：${escapeHtml(pub.riskControl.lastReason || '疑似滑块拦截')} · 预计恢复：${escapeHtml(formatRelTime(pub.riskControl.cooldownUntil))}（可在设置切换轮转节奏）</div>
     `;
   } else {
     riskEl.className = 'banner hidden';
     if (appState.privateState?.settings?.paused) {
       dot.className = 'brand-dot';
       pill.className = 'status-pill warn';
-      pill.textContent = '已手动暂停';
+      pill.textContent = '已暂停';
     } else if (activeCount > 0) {
       dot.className = 'brand-dot watching';
       pill.className = 'status-pill ok';
-      pill.textContent = `盯票中 (${activeCount})`;
+      pill.textContent = `盯票 ${activeCount} 部`;
     } else {
       dot.className = 'brand-dot';
       pill.className = 'status-pill';
-      pill.textContent = pub ? '待机省流' : '待初始化';
+      pill.textContent = pub ? '待机' : '加载中';
     }
   }
 }
@@ -1007,69 +1293,65 @@ function renderRadarTab(root) {
       </div>
       <div class="stat-tile">
         <div class="stat-val">${alerts.length}</div>
-        <div class="stat-lbl">已捕获波次</div>
+        <div class="stat-lbl">开票波次</div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
         <div>
-          <div class="card-title">快速星标电影</div>
-          <div class="muted">支持未定档关键词，匹配即自动追踪三影院每轮放票</div>
+          <div class="sheet-title">快速星标追踪</div>
+          <div class="muted">输入未定档片名也能持续追踪定档、开分与开票</div>
         </div>
-        <button class="btn btn-soft btn-sm" id="manualTickBtn" type="button">${icon('refresh')} 立即抓一次</button>
+        <button class="btn btn-soft btn-sm" id="manualTickBtn" type="button">${icon('refresh')} 抓一次</button>
       </div>
       <div class="row">
-        <div class="search-wrap" style="flex:1">
+        <div class="search-wrap" style="flex:1;margin-bottom:0">
           <span class="search-ico">${icon('search')}</span>
-          <input id="quickKeywordInput" class="input" placeholder="输入电影名，或去片单直接点星标" />
+          <input id="quickKeywordInput" class="input" style="background:var(--bg)" placeholder="输入电影名称关键词..." />
         </div>
-        <button class="btn btn-primary" id="quickStarBtn" type="button">${icon('star')} 星标</button>
+        <button class="btn btn-crimson" id="quickStarBtn" type="button">${icon('star')} 星标</button>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">正在持续盯票（${activeItems.length}）</div>
-        <button class="btn btn-soft btn-sm" id="refreshBtn" type="button">${icon('refresh')} 刷新</button>
+    <div class="sheet">
+      <div class="sheet-pad" style="padding-bottom:6px">
+        <div class="sheet-header" style="margin-bottom:0">
+          <div class="sheet-title">正在盯票（${activeItems.length}）</div>
+          <button class="btn btn-soft btn-sm" id="refreshBtn" type="button">${icon('refresh')} 刷新</button>
+        </div>
       </div>
       ${
         activeItems.length === 0
-          ? `<div class="muted" style="padding:8px 0">当前没有星标电影。可前往「片单」或「影院」点击星标，或在上方输入关键词。</div>`
+          ? `<div class="sheet-pad"><div class="muted">当前没有星标电影。可在「新片」页点星标，或在上方直接添加关键词。</div></div>`
           : activeItems
               .map((w) => {
                 const matches = findCurrentMovieMatchesAcrossCinemas(w);
                 const summaryHtml =
                   matches.length === 0
-                    ? `<div class="muted" style="margin-top:5px">暂未发现东莞排片，后台持续盯梢中...</div>`
+                    ? `<div class="movie-subline">暂未在东莞三影院查到排片，持续监听中</div>`
                     : matches
                         .map(({ cinema, movie }) => {
                           const specialCount = (movie.shows || []).filter((s) => s.isSpecial).length;
-                          return `<div class="muted" style="margin-top:3px;color:var(--text)">• <strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场${specialCount > 0 ? `（含 ${specialCount} 场特殊厅）` : ''}</div>`;
+                          return `<div class="movie-subline" style="color:var(--ink-secondary)">${escapeHtml(cinema.shortName)} · ${movie.showCount} 场${specialCount > 0 ? `（${specialCount} 特殊厅）` : ''}</div>`;
                         })
                         .join('');
                 return `
-                  <div class="card-subtle">
-                    <div class="movie-card">
+                  <div class="movie-row">
+                    <div class="poster-wrap open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}">
                       ${
                         w.poster
-                          ? `<img class="poster open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}" src="${escapeHtml(w.poster)}" alt="" loading="lazy" />`
+                          ? `<img class="poster" src="${escapeHtml(w.poster)}" alt="" loading="lazy" />`
                           : `<div class="poster-placeholder">${icon('film')}</div>`
                       }
-                      <div class="movie-body">
-                        <div class="row-between">
-                          <div class="movie-name clickable-title open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}">${escapeHtml(w.title || w.keyword)}</div>
-                          <span class="badge badge-imax">已推 ${w.roundCount || 0} 轮</span>
-                        </div>
-                        <div class="row" style="margin:3px 0 4px">
-                          <span class="badge badge-gt">${escapeHtml(hallFilterLabel(w.hallFilter))}</span>
-                          ${w.lastAlertAt ? `<span class="muted">上次提醒 ${formatRelTime(w.lastAlertAt)}</span>` : ''}
-                        </div>
-                        ${summaryHtml}
-                        <div class="row" style="margin-top:10px">
-                          <button class="btn btn-danger btn-sm stop-watch-btn" data-id="${escapeHtml(w.id)}" type="button">停止提醒</button>
-                        </div>
+                    </div>
+                    <div class="movie-meta">
+                      <div class="movie-head">
+                        <div class="movie-name open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}">${escapeHtml(w.title || w.keyword)}</div>
+                        <button class="star-pill starred stop-watch-btn" data-id="${escapeHtml(w.id)}" type="button">停止</button>
                       </div>
+                      <div class="movie-subline">${escapeHtml(hallFilterLabel(w.hallFilter))} · 已推 ${w.roundCount || 0} 轮${w.lastAlertAt ? ` · ${formatRelTime(w.lastAlertAt)}` : ''}</div>
+                      ${summaryHtml}
                     </div>
                   </div>
                 `;
@@ -1080,15 +1362,15 @@ function renderRadarTab(root) {
 
     ${
       stoppedItems.length > 0
-        ? `<div class="card">
-            <div class="card-header"><div class="card-title">已手动停止（${stoppedItems.length}）</div></div>
+        ? `<div class="sheet sheet-pad">
+            <div class="sheet-header"><div class="sheet-title">已手动停止（${stoppedItems.length}）</div></div>
             ${stoppedItems
               .map(
                 (w) => `
-              <div class="row-between" style="padding:9px 0;border-bottom:1px solid var(--border)">
+              <div class="row-between" style="padding:10px 0;border-bottom:1px solid var(--hairline)">
                 <div>
                   <div style="font-weight:600;font-size:14px">${escapeHtml(w.title || w.keyword)}</div>
-                  <div class="muted">历史 ${w.roundCount || 0} 轮 · ${escapeHtml(hallFilterLabel(w.hallFilter))}</div>
+                  <div class="muted">已推 ${w.roundCount || 0} 轮 · ${escapeHtml(hallFilterLabel(w.hallFilter))}</div>
                 </div>
                 <div class="row">
                   <button class="btn btn-soft btn-sm resume-watch-btn" data-id="${escapeHtml(w.id)}" type="button">恢复</button>
@@ -1102,19 +1384,19 @@ function renderRadarTab(root) {
         : ''
     }
 
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">开票播报历史</div>
-        <span class="muted">每轮一条摘要</span>
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
+        <div class="sheet-title">每轮开票记录</div>
+        <span class="muted">一轮一条摘要</span>
       </div>
       ${
         alerts.length === 0
-          ? `<div class="muted" style="padding:6px 0">暂无播报记录。星标电影新开售场次时会记录在这里。</div>`
+          ? `<div class="muted">暂无开票推送记录。当星标电影新开售场次时会记录在这里。</div>`
           : alerts
               .slice(0, 15)
               .map(
                 (a) => `
-              <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+              <div style="padding:10px 0;border-bottom:1px solid var(--hairline)">
                 <div class="row-between">
                   <strong style="font-size:13px">${escapeHtml(a.title)}</strong>
                   <span class="muted">${formatRelTime(a.createdAt)}</span>
@@ -1192,11 +1474,11 @@ function renderCinemasTab(root) {
       ).join('')}
     </div>
 
-    <div class="card" style="padding:13px 15px">
+    <div class="sheet sheet-pad" style="padding:13px 16px">
       <div class="row-between">
         <div>
-          <div style="font-weight:700;font-size:14px">${escapeHtml(CINEMAS.find((c) => c.id === appState.activeCinemaId)?.name)}</div>
-          <div class="muted">更新于 ${escapeHtml(formatRelTime(cinemaData?.fetchedAt))} · 在售影片 ${movies.length} 部</div>
+          <div style="font-weight:700;font-size:14.5px">${escapeHtml(CINEMAS.find((c) => c.id === appState.activeCinemaId)?.name)}</div>
+          <div class="muted">更新于 ${escapeHtml(formatRelTime(cinemaData?.fetchedAt))} · 在售 ${movies.length} 部</div>
         </div>
         <button class="btn ${appState.specialHallOnly ? 'btn-primary' : 'btn-soft'} btn-sm" id="specialToggleBtn" type="button">
           ${appState.specialHallOnly ? '仅看特殊厅' : '全部影厅'}
@@ -1218,50 +1500,50 @@ function renderCinemasTab(root) {
 
     ${
       movies.length === 0
-        ? `<div class="card"><div class="muted">暂无排片缓存，请前往「设置」配对后点击「立即抓一次」。</div></div>`
-        : movies
-            .map((m) => {
-              const filteredShows = (m.shows || []).filter((s) => {
-                if (appState.activeDateFilter !== 'all' && s.dt !== appState.activeDateFilter) return false;
-                if (appState.specialHallOnly && !s.isSpecial) return false;
-                return true;
-              });
-              if (appState.specialHallOnly && filteredShows.length === 0) return '';
+        ? `<div class="sheet sheet-pad"><div class="muted">暂无排片缓存，请前往「设置」配对后点击抓取。</div></div>`
+        : `<div class="sheet">
+            ${movies
+              .map((m) => {
+                const filteredShows = (m.shows || []).filter((s) => {
+                  if (appState.activeDateFilter !== 'all' && s.dt !== appState.activeDateFilter) return false;
+                  if (appState.specialHallOnly && !s.isSpecial) return false;
+                  return true;
+                });
+                if (appState.specialHallOnly && filteredShows.length === 0) return '';
 
-              const isStarred = watchlist.some(
-                (w) =>
-                  w.active !== false &&
-                  ((w.movieId && Number(w.movieId) === Number(m.id)) ||
-                    (w.keyword && m.nm.toLowerCase().includes(w.keyword.toLowerCase())))
-              );
+                const isStarred = watchlist.some(
+                  (w) =>
+                    w.active !== false &&
+                    ((w.movieId && Number(w.movieId) === Number(m.id)) ||
+                      (w.keyword && m.nm.toLowerCase().includes(w.keyword.toLowerCase())))
+                );
 
-              return `
-                <div class="card">
-                  <div class="movie-card">
-                    ${
-                      m.img
-                        ? `<img class="poster open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">${icon('film')}</div>`
-                    }
-                    <div class="movie-body">
-                      <div class="row-between">
-                        <div class="movie-name clickable-title open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
-                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-soft'} star-movie-btn"
+                return `
+                  <div class="movie-row">
+                    <div class="poster-wrap open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
+                      ${
+                        m.img
+                          ? `<img class="poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
+                          : `<div class="poster-placeholder">${icon('film')}</div>`
+                      }
+                    </div>
+                    <div class="movie-meta">
+                      <div class="movie-head">
+                        <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
+                        <button class="star-pill ${isStarred ? 'starred' : ''} star-movie-btn"
                           data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
                         </button>
                       </div>
-                      <div class="muted">${escapeHtml(m.desc || '')}</div>
+                      <div class="movie-subline">${escapeHtml(m.desc || '')}</div>
                       <div class="showtime-grid">
                         ${filteredShows
                           .slice(0, 18)
                           .map(
                             (s) => `
                           <div class="showtime-box ${s.isImaxGt ? 'gt' : s.isSpecial ? 'special' : ''}">
-                            <div class="row-between">
-                              <span class="showtime-tm">${escapeHtml(s.tm)}</span>
-                              ${s.tags?.length ? `<span class="badge ${s.isImaxGt ? 'badge-gt' : 'badge-imax'}">${escapeHtml(s.tags[0])}</span>` : `<span class="muted">${escapeHtml(s.tp)}</span>`}
-                            </div>
+                            <div class="showtime-tm">${escapeHtml(s.tm)}</div>
+                            <div class="showtime-tag">${s.tags?.length ? escapeHtml(s.tags[0]) : escapeHtml(s.tp || '普通')}</div>
                             <div class="showtime-hall">${escapeHtml(s.dt.slice(5))} · ${escapeHtml(s.th)}</div>
                           </div>
                         `
@@ -1271,10 +1553,10 @@ function renderCinemasTab(root) {
                       ${filteredShows.length > 18 ? `<div class="muted" style="margin-top:6px">仅展示前 18 场，共 ${filteredShows.length} 场</div>` : ''}
                     </div>
                   </div>
-                </div>
-              `;
-            })
-            .join('')
+                `;
+              })
+              .join('')}
+          </div>`
     }
   `;
 
@@ -1322,61 +1604,61 @@ function renderDynamicsTab(root) {
   const lastCatSync = appState.publicState?.lastCatalogSyncAt ? formatRelTime(appState.publicState.lastCatalogSyncAt) : '尚未同步';
 
   root.innerHTML = `
-    <div class="card">
-      <div class="row-between" style="margin-bottom:10px">
-        <div>
-          <div class="card-title">新片全网动态</div>
-          <div class="muted">每 5 分钟同步全量新片定档/开票/改档/开分 · ${escapeHtml(lastCatSync)}（仅星标片会触发推送）</div>
-        </div>
-        <button class="btn btn-soft btn-sm" id="dynSyncBtn" type="button">${icon('refresh')} 刷新</button>
-      </div>
-      <div class="pill-group" style="margin-bottom:0">
-        <button class="chip ${appState.dynamicsFilter === 'all' ? 'active' : ''}" data-df="all" type="button">全部 (${dynamics.length})</button>
-        <button class="chip ${appState.dynamicsFilter === 'scheduled' ? 'active' : ''}" data-df="scheduled" type="button">定档</button>
-        <button class="chip ${appState.dynamicsFilter === 'presale_opened' ? 'active' : ''}" data-df="presale_opened" type="button">开票</button>
-        <button class="chip ${appState.dynamicsFilter === 'rescheduled' ? 'active' : ''}" data-df="rescheduled" type="button">改档</button>
-        <button class="chip ${appState.dynamicsFilter === 'scored' ? 'active' : ''}" data-df="scored" type="button">开分</button>
-      </div>
+    <div class="toolbar-bar">
+      <div class="muted">全量动态每 5 分钟巡检 · ${escapeHtml(lastCatSync)}（仅星标片触发推送）</div>
+      <button class="icon-circle-btn" id="dynSyncBtn" type="button" title="刷新">${icon('refresh')}</button>
+    </div>
+    <div class="pill-group">
+      <button class="chip ${appState.dynamicsFilter === 'all' ? 'active' : ''}" data-df="all" type="button">全部 ${dynamics.length}</button>
+      <button class="chip ${appState.dynamicsFilter === 'scheduled' ? 'active' : ''}" data-df="scheduled" type="button">定档</button>
+      <button class="chip ${appState.dynamicsFilter === 'presale_opened' ? 'active' : ''}" data-df="presale_opened" type="button">开票</button>
+      <button class="chip ${appState.dynamicsFilter === 'rescheduled' ? 'active' : ''}" data-df="rescheduled" type="button">改档</button>
+      <button class="chip ${appState.dynamicsFilter === 'scored' ? 'active' : ''}" data-df="scored" type="button">开分</button>
     </div>
 
     ${
       filtered.length === 0
-        ? `<div class="card"><div class="muted" style="padding:8px 0">暂无新动态记录。每当新电影出现定档、开票、改档或开分时都会记录在这里，星标片会同步推提醒。</div></div>`
-        : filtered
-            .map((d) => {
-              const isStarred = watchlist.some(
-                (w) => w.active !== false && Number(w.movieId) === Number(d.movieId)
-              );
-              return `
-                <div class="card">
-                  <div class="movie-card">
-                    ${
-                      d.poster
-                        ? `<img class="poster open-detail-trigger" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster)}" src="${escapeHtml(d.poster)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">${icon('film')}</div>`
-                    }
-                    <div class="movie-body">
-                      <div class="row-between">
+        ? `<div class="sheet sheet-pad"><div class="muted">暂无动态记录。每当新电影出现定档、开票、改档或开分时都会记录在这里。</div></div>`
+        : `<div class="sheet">
+            ${filtered
+              .map((d) => {
+                const isStarred = watchlist.some(
+                  (w) => w.active !== false && Number(w.movieId) === Number(d.movieId)
+                );
+                return `
+                  <div class="dyn-row">
+                    <div class="dyn-dot-col">
+                      <span class="dyn-dot ${escapeHtml(d.type)}"></span>
+                    </div>
+                    <div class="poster-wrap open-detail-trigger" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">
+                      ${
+                        d.poster
+                          ? `<img class="poster" style="width:52px;height:74px" src="${escapeHtml(d.poster)}" alt="" loading="lazy" />`
+                          : `<div class="poster-placeholder" style="width:52px;height:74px">${icon('film')}</div>`
+                      }
+                    </div>
+                    <div class="movie-meta">
+                      <div class="movie-head">
                         <div class="row" style="gap:6px;min-width:0;flex:1">
-                          <span class="badge dyn-${escapeHtml(d.type)}">${escapeHtml(d.typeLabel)}</span>
-                          <span class="movie-name clickable-title open-detail-trigger" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">${escapeHtml(d.title)}</span>
+                          <span class="dyn-badge ${escapeHtml(d.type)}">${escapeHtml(d.typeLabel)}</span>
+                          <span class="movie-name open-detail-trigger" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">${escapeHtml(d.title)}</span>
                         </div>
-                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-soft'} star-dyn-btn"
+                        <button class="star-pill ${isStarred ? 'starred' : ''} star-dyn-btn"
                           data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}" type="button">
-                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
                         </button>
                       </div>
-                      <div style="margin-top:6px;font-size:13px;font-weight:600;color:var(--text)">${escapeHtml(d.summary)}</div>
-                      <div class="row-between" style="margin-top:4px">
+                      <div style="margin-top:5px;font-size:13px;font-weight:600;color:var(--ink)">${escapeHtml(d.summary)}</div>
+                      <div class="row-between" style="margin-top:3px">
                         <span class="muted">${escapeHtml(d.detail || '')}</span>
                         <span class="muted">${escapeHtml(formatRelTime(d.createdAt))}</span>
                       </div>
                     </div>
                   </div>
-                </div>
-              `;
-            })
-            .join('')
+                `;
+              })
+              .join('')}
+          </div>`
     }
   `;
 
@@ -1438,84 +1720,157 @@ function renderCatalogTab(root) {
   const watchlist = getEffectiveWatchlist();
   const isRankMode = appState.catalogTab === 'wish_total' || appState.catalogTab === 'wish_daily';
 
+  const { movie: heroMovie, intel: heroIntel, releaseDateStr: heroDate } = resolveHeroMovie();
+  const heroCd = computeCountdownParts(heroDate);
+  const pad = (n) => String(n).padStart(2, '0');
+  const heroStarred = watchlist.some(
+    (w) =>
+      w.active !== false &&
+      ((w.movieId && Number(w.movieId) === Number(heroMovie.id)) ||
+        (w.keyword && String(heroMovie.nm || '').toLowerCase().includes(w.keyword.toLowerCase())))
+  );
+  const heroDateCaption = heroDate
+    ? `${heroDate.replace(/-/g, '.')}${heroMovie.comingTitle ? ` · ${heroMovie.comingTitle}` : ''}`
+    : heroMovie.comingTitle || '尚未定具体档期';
+
+  const heroClockHtml =
+    heroCd.status === 'future'
+      ? `
+        <div id="heroCountdownClock" class="countdown-clock" data-target-date="${escapeHtml(heroDate)}">
+          <span class="cd-unit"><span id="heroCdDays" class="cd-num accent">${heroCd.days}</span><span class="cd-lbl">天</span></span>
+          <span class="cd-unit"><span id="heroCdHours" class="cd-num">${pad(heroCd.hours)}</span><span class="cd-lbl">时</span></span>
+          <span class="cd-unit"><span id="heroCdMins" class="cd-num">${pad(heroCd.mins)}</span><span class="cd-lbl">分</span></span>
+          <span class="cd-unit"><span id="heroCdSecs" class="cd-num">${pad(heroCd.secs)}</span><span class="cd-lbl">秒</span></span>
+        </div>
+      `
+      : heroCd.status === 'today'
+        ? `<div class="countdown-clock"><span class="cd-num accent" style="font-size:24px">今日正式上映</span></div>`
+        : heroCd.status === 'released'
+          ? `<div class="countdown-clock"><span class="cd-unit"><span class="cd-num" style="font-size:24px">已上映 ${heroCd.elapsedDays}</span><span class="cd-lbl">天</span></span></div>`
+          : `<div class="countdown-clock"><span class="cd-lbl" style="font-size:14px;color:rgba(255,255,255,0.8)">暂未定档 · 可点右上角手动设目标日期</span></div>`;
+
+  const heroHtml = `
+    <section class="countdown-hero">
+      ${heroMovie.img ? `<div class="countdown-hero-bg" style="background-image:url('${escapeHtml(heroMovie.img)}')"></div>` : ''}
+      <div class="countdown-hero-scrim"></div>
+      <div class="hero-top">
+        <span class="hero-kicker">FEATURED COUNTDOWN</span>
+        <button class="hero-switch-btn" id="openCountdownPickerBtn" type="button">换一部 ${icon('chevronDown')}</button>
+      </div>
+      <div class="hero-main">
+        ${
+          heroMovie.img
+            ? `<img class="hero-poster-thumb open-detail-trigger" data-mid="${heroMovie.id}" data-title="${escapeHtml(heroMovie.nm)}" data-poster="${escapeHtml(heroMovie.img)}" src="${escapeHtml(heroMovie.img)}" alt="" />`
+            : `<div class="poster-placeholder" style="width:82px;height:116px;background:rgba(255,255,255,0.1);color:#fff">${icon('film')}</div>`
+        }
+        <div class="hero-info">
+          <div class="hero-title open-detail-trigger" data-mid="${heroMovie.id}" data-title="${escapeHtml(heroMovie.nm)}" data-poster="${escapeHtml(heroMovie.img || '')}">${escapeHtml(heroMovie.nm)}</div>
+          <div class="hero-date-line">${escapeHtml(heroIntel.enm ? `${heroIntel.enm} · ` : '')}${escapeHtml(heroDateCaption)}</div>
+          ${heroClockHtml}
+        </div>
+      </div>
+      <div class="hero-bottom">
+        <div class="hero-wish">
+          猫眼 ${formatWishCount(heroMovie.wish)}${Number(heroMovie.wishDailyGain || 0) > 0 ? ` (+${Number(heroMovie.wishDailyGain).toLocaleString('zh-CN')})` : ''}${heroIntel.tppWish > 0 ? ` · 淘票票 ${formatWishCount(heroIntel.tppWish)}` : ''}
+        </div>
+        <button class="hero-star-btn ${heroStarred ? 'starred' : ''}" id="heroStarBtn" type="button">
+          ${icon(heroStarred ? 'starFill' : 'star')} ${heroStarred ? '已星标' : '盯票'}
+        </button>
+      </div>
+    </section>
+  `;
+
   root.innerHTML = `
-    <div class="card">
-      <div class="row-between" style="margin-bottom:10px">
-        <div class="muted">全量片单共 <strong>${comingList.length + onInfoList.length}</strong> 部 · 点片名查看双平台想看与评分</div>
-        <button class="btn btn-soft btn-sm" id="syncCatalogBtn" type="button">${icon('refresh')} 刷新</button>
+    ${heroHtml}
+
+    <div class="toolbar-bar">
+      <div class="underline-tabs">
+        <button class="u-tab ${appState.catalogTab === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">待映 ${comingList.length}</button>
+        <button class="u-tab ${appState.catalogTab === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">热映 ${onInfoList.length}</button>
+        <button class="u-tab ${appState.catalogTab === 'wish_total' ? 'active' : ''}" data-ctab="wish_total" type="button">想看榜</button>
+        <button class="u-tab ${appState.catalogTab === 'wish_daily' ? 'active' : ''}" data-ctab="wish_daily" type="button">飙升榜</button>
       </div>
-      <div class="segmented">
-        <button class="seg-btn ${appState.catalogTab === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">待映 (${comingList.length})</button>
-        <button class="seg-btn ${appState.catalogTab === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">热映 (${onInfoList.length})</button>
-        <button class="seg-btn ${appState.catalogTab === 'wish_total' ? 'active' : ''}" data-ctab="wish_total" type="button">想看总榜</button>
-        <button class="seg-btn ${appState.catalogTab === 'wish_daily' ? 'active' : ''}" data-ctab="wish_daily" type="button">日增排名</button>
-      </div>
-      <div class="search-wrap">
-        <span class="search-ico">${icon('search')}</span>
-        <input id="catalogSearchInput" class="input" value="${escapeHtml(appState.catalogSearch)}" placeholder="搜索片名（新片可去盯票页关键词追踪）" />
-      </div>
+      <button class="icon-circle-btn" id="syncCatalogBtn" type="button" title="刷新片单">${icon('refresh')}</button>
+    </div>
+
+    <div class="search-wrap">
+      <span class="search-ico">${icon('search')}</span>
+      <input id="catalogSearchInput" class="input" value="${escapeHtml(appState.catalogSearch)}" placeholder="搜索全部新片..." />
     </div>
 
     ${
       filtered.length === 0
-        ? `<div class="card"><div class="muted">暂无匹配片单。你可以直接切换到「盯票」页用关键词手动星标，或点击「刷新」。</div></div>`
-        : filtered
-            .map((m, idx) => {
-              const isStarred = watchlist.some(
-                (w) => w.active !== false && Number(w.movieId) === Number(m.id)
-              );
-              const hasImax = /imax/i.test(m.version || '');
-              const intel = intelMap[String(m.id)] || {};
-              const maoyanSc = Number(intel.maoyanScore || m.sc || 0);
-              const scorePills = [
-                maoyanSc > 0 ? `猫眼 ${maoyanSc}` : '',
-                intel.doubanScore > 0 ? `豆瓣 ${intel.doubanScore}` : '',
-                intel.imdbScore > 0 ? `IMDb ${intel.imdbScore}` : '',
-                intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `烂番茄 ${intel.rtCriticsScore}%` : ''
-              ].filter(Boolean);
-              const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+        ? `<div class="sheet sheet-pad"><div class="muted">暂无匹配影片。你也可以切到「盯票」直接输入关键词追踪未收录新片。</div></div>`
+        : `<div class="sheet">
+            ${filtered
+              .map((m, idx) => {
+                const isStarred = watchlist.some(
+                  (w) => w.active !== false && Number(w.movieId) === Number(m.id)
+                );
+                const hasImax = /imax/i.test(m.version || '');
+                const intel = intelMap[String(m.id)] || {};
+                const maoyanSc = Number(intel.maoyanScore || m.sc || 0);
+                const scoreBits = [
+                  maoyanSc > 0 ? `猫眼 ${maoyanSc}` : '',
+                  intel.doubanScore > 0 ? `豆瓣 ${intel.doubanScore}` : '',
+                  intel.imdbScore > 0 ? `IMDb ${intel.imdbScore}` : '',
+                  intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `烂番茄 ${intel.rtCriticsScore}%` : ''
+                ].filter(Boolean);
+                const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+                const subMetaLine = [
+                  m.rt || m.comingTitle || m.statusLabel || '',
+                  hasImax ? 'IMAX' : '',
+                  intel.cat || '',
+                  m.star || ''
+                ]
+                  .filter(Boolean)
+                  .join(' · ');
 
-              return `
-                <div class="card">
-                  <div class="movie-card">
-                    ${
-                      m.img
-                        ? `<img class="poster open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img)}" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">${icon('film')}</div>`
-                    }
-                    <div class="movie-body">
-                      <div class="row-between">
-                        <div class="row" style="gap:6px;min-width:0;flex:1">
-                          ${isRankMode ? `<span class="rank-num ${rankClass}">#${idx + 1}</span>` : ''}
-                          <div class="movie-name clickable-title open-detail-trigger" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
-                        </div>
-                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-primary'} star-cat-btn"
+                return `
+                  <div class="movie-row">
+                    <div class="poster-wrap open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">
+                      ${isRankMode ? `<span class="rank-corner ${rankClass}">${String(idx + 1).padStart(2, '0')}</span>` : ''}
+                      ${
+                        m.img
+                          ? `<img class="poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
+                          : `<div class="poster-placeholder">${icon('film')}</div>`
+                      }
+                    </div>
+                    <div class="movie-meta">
+                      <div class="movie-head">
+                        <div class="movie-name open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
+                        <button class="star-pill ${isStarred ? 'starred' : ''} star-cat-btn"
                           data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '盯票中' : '盯票'}
                         </button>
                       </div>
-                      <div class="row" style="margin:6px 0;gap:5px">
-                        <span class="badge badge-normal">${escapeHtml(m.statusLabel || '')}</span>
-                        ${hasImax ? `<span class="badge badge-imax">IMAX</span>` : ''}
-                        <span class="badge badge-gt">猫眼想看 ${formatWishCount(m.wish)}</span>
-                        ${intel.tppWish > 0 ? `<span class="badge badge-imax">淘票票 ${formatWishCount(intel.tppWish)}</span>` : ''}
-                        ${Number(m.wishDailyGain || 0) > 0 ? `<span class="badge dyn-presale_opened">今日 +${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
-                        ${m.rt ? `<span class="muted">${escapeHtml(m.rt)}</span>` : ''}
+                      <div class="movie-subline">${escapeHtml(subMetaLine)}</div>
+                      <div class="movie-wishline">
+                        <span>猫眼 ${formatWishCount(m.wish)}</span>
+                        ${Number(m.wishDailyGain || 0) > 0 ? `<span class="gain-text">+${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
+                        ${intel.tppWish > 0 ? `<span class="muted">· 淘票票 ${formatWishCount(intel.tppWish)}</span>` : ''}
                       </div>
                       ${
-                        scorePills.length > 0
-                          ? `<div class="score-mini-row">${scorePills.map((sp) => `<span class="score-mini">${escapeHtml(sp)}</span>`).join('')}</div>`
+                        scoreBits.length > 0
+                          ? `<div class="movie-scoreline"><span class="score-accent">${escapeHtml(scoreBits[0])}</span>${scoreBits.length > 1 ? ` · ${escapeHtml(scoreBits.slice(1).join(' · '))}` : ''}</div>`
                           : ''
                       }
-                      ${m.star ? `<div class="muted" style="margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(m.star)}</div>` : ''}
                     </div>
                   </div>
-                </div>
-              `;
-            })
-            .join('')
+                `;
+              })
+              .join('')}
+          </div>`
     }
   `;
+
+  document.getElementById('openCountdownPickerBtn').onclick = openCountdownPickerModal;
+  document.getElementById('heroStarBtn').onclick = () =>
+    openStarModal({
+      movieId: heroMovie.id,
+      title: heroMovie.nm,
+      poster: heroMovie.img || ''
+    });
 
   root.querySelectorAll('[data-ctab]').forEach((btn) => {
     btn.onclick = () => {
@@ -1567,10 +1922,10 @@ function renderSettingsTab(root) {
   const workflowDispatchUrl = `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/actions/workflows/monitor.yml/dispatches`;
 
   root.innerHTML = `
-    <div class="card">
-      <div class="card-header">
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
         <div>
-          <div class="card-title">${icon('bell')} 本机通知推送</div>
+          <div class="sheet-title">${icon('bell')} 本机通知推送</div>
           <div class="muted">${
             plat.isIOS
               ? plat.isStandalone
@@ -1583,11 +1938,11 @@ function renderSettingsTab(root) {
         </div>
       </div>
       <div class="row">
-        <button class="btn btn-primary" id="subWebPushBtn" type="button">
+        <button class="btn btn-crimson" id="subWebPushBtn" type="button">
           ${icon('bell')} ${appState.pushSub ? '重新开启本机推送' : '开启本机推送'}
         </button>
         <button class="btn btn-soft" id="testSoundBtn" type="button">${icon('volume')} 测提示音</button>
-        <button class="btn btn-soft" id="testRemotePushBtn" type="button">${icon('send')} 发测试推送</button>
+        <button class="btn btn-soft" id="testRemotePushBtn" type="button">${icon('send')} 测远程推送</button>
       </div>
       ${
         subs.length > 0
@@ -1596,10 +1951,10 @@ function renderSettingsTab(root) {
       }
     </div>
 
-    <div class="card">
-      <div class="card-header">
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
         <div>
-          <div class="card-title">${icon('shield')} 华为保活 & 微信兜底通知</div>
+          <div class="sheet-title">${icon('shield')} 华为保活 & 微信兜底通知</div>
           <div class="muted">华为若被系统清理后台，开启网页哨兵或 PushPlus 微信提醒可确保 100% 收到</div>
         </div>
       </div>
@@ -1643,10 +1998,10 @@ function renderSettingsTab(root) {
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
         <div>
-          <div class="card-title">盯票与推送策略</div>
+          <div class="sheet-title">盯票与推送策略</div>
           <div class="muted">盯票随 Cron 每 1~2 分钟抓 3 家影院；片单、淘票票想看与开分每 5 分钟刷新</div>
         </div>
       </div>
@@ -1686,10 +2041,10 @@ function renderSettingsTab(root) {
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
+    <div class="sheet sheet-pad">
+      <div class="sheet-header">
         <div>
-          <div class="card-title">${icon('link')} 朋友配对与设备同步</div>
+          <div class="sheet-title">${icon('link')} 朋友配对与设备同步</div>
           <div class="muted">${isPaired() ? '已完成配对 · 可一键分享给朋友或粘贴配对链接导入' : '请粘贴收到的 #pair= 配对链接一键导入'}</div>
         </div>
       </div>
@@ -1698,7 +2053,7 @@ function renderSettingsTab(root) {
         <label>快速导入（整条粘贴朋友链接即可）</label>
         <div class="row">
           <input id="quickPairUrlInput" class="input" style="flex:1" placeholder="https://...#pair=..." />
-          <button class="btn btn-primary btn-sm" id="importPairUrlBtn" type="button">一键导入</button>
+          <button class="btn btn-crimson btn-sm" id="importPairUrlBtn" type="button">一键导入</button>
         </div>
       </div>
       <div class="row" style="margin-top:8px">
@@ -1706,7 +2061,7 @@ function renderSettingsTab(root) {
       </div>
       ${
         appState.pairingFeedback
-          ? `<div class="muted" style="margin-top:8px;color:${appState.pairingFeedback.ok ? 'var(--green)' : 'var(--red)'}">${escapeHtml(appState.pairingFeedback.text)}</div>`
+          ? `<div class="muted" style="margin-top:8px;color:${appState.pairingFeedback.ok ? 'var(--green)' : 'var(--crimson)'}">${escapeHtml(appState.pairingFeedback.text)}</div>`
           : isPaired()
             ? `<div class="muted" style="margin-top:8px;color:var(--green)">已连接私有 Gist（${escapeHtml(cfg.gistId.slice(0, 8))}...，共 ${subs.length} 台设备）</div>`
             : `<div class="muted" style="margin-top:8px">尚未配对：请粘入配对链接，或在下方开发者配置填入参数。</div>`
@@ -2027,6 +2382,7 @@ async function bootstrap() {
   bindNavigation();
   await initServiceWorker();
   render();
+  startCountdownTicker();
   await syncAllData({ silent: true });
   startOrStopSentinelTimer();
   if (appState.sentinel.keepAwake) {
