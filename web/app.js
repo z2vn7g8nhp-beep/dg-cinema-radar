@@ -37,8 +37,28 @@ const appState = {
   sentinelTimer: null,
   generatedVapid: null,
   pairingFeedback: null,
+  incomingWeChatPairLink: '',
   busy: false
 };
+
+const SVG_ICONS = {
+  star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  starFill: '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 4v16"/><path d="M17 4v16"/><path d="M3 9h4"/><path d="M3 15h4"/><path d="M17 9h4"/><path d="M17 15h4"/></svg>',
+  volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
+  send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>'
+};
+
+function icon(name) {
+  return `<span class="inline-icon" aria-hidden="true">${SVG_ICONS[name] || ''}</span>`;
+}
 
 function detectRepoFromLocation() {
   const host = window.location.hostname;
@@ -97,10 +117,11 @@ function detectPlatform() {
   const ua = navigator.userAgent || '';
   const isIOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isHuawei = /HUAWEI|HONOR|HarmonyOS|HuaweiBrowser|ArkWeb/i.test(ua);
+  const isWeChat = /MicroMessenger/i.test(ua);
   const isAndroid = /Android/i.test(ua);
   const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
   const supportsPush = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-  return { isIOS, isHuawei, isAndroid, isStandalone, supportsPush };
+  return { isIOS, isHuawei, isWeChat, isAndroid, isStandalone, supportsPush };
 }
 
 function escapeHtml(str) {
@@ -187,87 +208,96 @@ function openMovieDetailModal({ movieId = null, title = '', poster = '' }) {
   root.classList.remove('hidden');
   root.innerHTML = `
     <div class="modal-sheet">
-      <div class="row-between" style="margin-bottom:10px">
-        <div class="card-title">🎬 电影全维详情</div>
-        <button class="btn btn-sm" id="closeDetailModalBtn" type="button">关闭</button>
-      </div>
-
-      <div class="movie-card" style="margin-bottom:10px">
-        ${
-          resolvedPoster
-            ? `<img class="poster" src="${escapeHtml(resolvedPoster)}" alt="" />`
-            : `<div class="poster-placeholder">🎬</div>`
-        }
-        <div class="movie-body">
-          <div class="movie-name" style="font-size:16px">${escapeHtml(resolvedTitle)}</div>
-          ${intel.enm ? `<div class="muted">${escapeHtml(intel.enm)}</div>` : ''}
-          <div class="row" style="margin:6px 0">
-            ${catMovie?.statusLabel ? `<span class="badge badge-imax">${escapeHtml(catMovie.statusLabel)}</span>` : ''}
-            ${catMovie?.rt ? `<span class="badge badge-normal">${escapeHtml(catMovie.rt)}</span>` : ''}
-            ${intel.cat ? `<span class="muted">${escapeHtml(intel.cat)}${intel.dur ? ` · ${intel.dur}分钟` : ''}</span>` : ''}
+      <div class="detail-hero">
+        ${resolvedPoster ? `<div class="detail-hero-bg" style="background-image:url('${escapeHtml(resolvedPoster)}')"></div>` : ''}
+        <div class="detail-hero-scrim"></div>
+        <div class="detail-hero-content">
+          <div class="row-between" style="margin-bottom:12px">
+            <div class="muted" style="font-weight:700;letter-spacing:0.02em">影片详情与四平台评分</div>
+            <button class="btn btn-soft btn-sm" id="closeDetailModalBtn" type="button">关闭</button>
           </div>
-          ${intel.dir || catMovie?.star ? `<div class="muted">${escapeHtml([intel.dir ? `导演：${intel.dir}` : '', catMovie?.star ? `主演：${catMovie.star}` : ''].filter(Boolean).join(' · '))}</div>` : ''}
-        </div>
-      </div>
-
-      <div style="font-size:12px;font-weight:700;color:var(--text-dim);margin-top:8px">想看指数对比（猫眼 & 淘票票）</div>
-      <div class="wish-compare-grid">
-        <div class="metric-box">
-          <div class="metric-label"><span>🐱 猫眼想看</span><span style="color:var(--green)">今日 +${wishDailyGain.toLocaleString('zh-CN')}</span></div>
-          <div class="metric-val" style="color:var(--gold)">${formatWishCount(wishVal)}</div>
-          <div class="metric-sub">${wishYesterdayGain > 0 ? `昨日增长 +${wishYesterdayGain.toLocaleString('zh-CN')}` : '以猫眼实时想看为准'}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label"><span>🎫 淘票票想看</span>${intel.tppScore ? `<span style="color:var(--cyan)">${intel.tppScore}分</span>` : ''}</div>
-          <div class="metric-val" style="font-size:${intel.tppWish ? '18px' : '13px'};color:${intel.tppWish ? 'var(--cyan)' : 'var(--text-dim)'}">
-            ${intel.tppWish ? formatWishCount(intel.tppWish) : '暂未匹配到条目'}
-          </div>
-          <div class="metric-sub">
-            <a href="https://m.taopiaopiao.com/" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">去淘票票查看 →</a>
+          <div class="movie-card">
+            ${
+              resolvedPoster
+                ? `<img class="hero-poster" src="${escapeHtml(resolvedPoster)}" alt="" />`
+                : `<div class="poster-placeholder" style="width:84px;height:118px">${icon('film')}</div>`
+            }
+            <div class="movie-body">
+              <div class="movie-name" style="font-size:18px;line-height:1.25">${escapeHtml(resolvedTitle)}</div>
+              ${intel.enm ? `<div class="muted" style="margin-bottom:4px">${escapeHtml(intel.enm)}</div>` : ''}
+              <div class="row" style="margin:6px 0;gap:5px">
+                ${catMovie?.statusLabel ? `<span class="badge badge-coral">${escapeHtml(catMovie.statusLabel)}</span>` : ''}
+                ${catMovie?.rt ? `<span class="badge badge-normal">${escapeHtml(catMovie.rt)}</span>` : ''}
+                ${intel.cat ? `<span class="muted">${escapeHtml(intel.cat)}${intel.dur ? ` · ${intel.dur}分钟` : ''}</span>` : ''}
+              </div>
+              ${intel.dir || catMovie?.star ? `<div class="muted" style="line-height:1.45">${escapeHtml([intel.dir ? `导演：${intel.dir}` : '', catMovie?.star ? `主演：${catMovie.star}` : ''].filter(Boolean).join('\n'))}</div>` : ''}
+            </div>
           </div>
         </div>
       </div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--text-dim);margin-top:10px">四平台开分看板</div>
-      <div class="score-grid">
-        <div class="metric-box">
-          <div class="metric-label"><span>猫眼评分</span></div>
-          <div class="metric-val" style="color:var(--gold)">${maoyanScore > 0 ? maoyanScore : '未开分'}</div>
-          <div class="metric-sub">${intel.maoyanVotes ? `${formatWishCount(intel.maoyanVotes)}人评` : '官方评分'}</div>
+      <div class="modal-sheet-pad" style="padding-top:10px">
+        <div class="section-label" style="margin-top:0">想看人数对比</div>
+        <div class="wish-compare-grid">
+          <div class="metric-box">
+            <div class="metric-label"><span>猫眼想看</span><span style="color:var(--green)">今日 +${wishDailyGain.toLocaleString('zh-CN')}</span></div>
+            <div class="metric-val" style="color:var(--accent)">${formatWishCount(wishVal)}</div>
+            <div class="metric-sub">${wishYesterdayGain > 0 ? `昨日 +${wishYesterdayGain.toLocaleString('zh-CN')}` : '想看排行榜基准'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label"><span>淘票票想看</span>${intel.tppScore ? `<span style="color:var(--blue)">${intel.tppScore}分</span>` : ''}</div>
+            <div class="metric-val" style="font-size:${intel.tppWish ? '19px' : '14px'};color:${intel.tppWish ? 'var(--blue)' : 'var(--text-muted)'}">
+              ${intel.tppWish ? formatWishCount(intel.tppWish) : '暂未匹配'}
+            </div>
+            <div class="metric-sub">
+              <a class="link-clean" href="https://m.taopiaopiao.com/" target="_blank" rel="noopener">淘票票查看 →</a>
+            </div>
+          </div>
         </div>
-        <div class="metric-box">
-          <div class="metric-label"><span>豆瓣评分</span>${intel.doubanUrl ? `<a href="${escapeHtml(intel.doubanUrl)}" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">详情↗</a>` : ''}</div>
-          <div class="metric-val" style="color:var(--green)">${intel.doubanScore > 0 ? intel.doubanScore : '未开分'}</div>
-          <div class="metric-sub">${intel.doubanVotes ? `${formatWishCount(intel.doubanVotes)}人评` : '待抓取或未开分'}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label"><span>IMDb 评分</span>${intel.imdbUrl ? `<a href="${escapeHtml(intel.imdbUrl)}" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">详情↗</a>` : ''}</div>
-          <div class="metric-val" style="color:var(--cyan)">${intel.imdbScore > 0 ? `${intel.imdbScore}` : '未开分'}</div>
-          <div class="metric-sub">${intel.imdbVotes ? `${formatWishCount(intel.imdbVotes)} votes` : (intel.enm ? '待抓取或未开分' : '需英文片名匹配')}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label"><span>烂番茄</span>${intel.rtUrl ? `<a href="${escapeHtml(intel.rtUrl)}" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">详情↗</a>` : ''}</div>
-          <div class="metric-val" style="color:var(--red)">${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `🍅 ${intel.rtCriticsScore}%` : '未开分'}</div>
-          <div class="metric-sub">${intel.rtAudienceScore !== null && intel.rtAudienceScore !== undefined ? `爆米花 ${intel.rtAudienceScore}%` : '媒体新鲜度'}</div>
-        </div>
-      </div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--text-dim);margin-top:10px">东莞三家影院当前排片</div>
-      ${
-        cinemaMatches.length === 0
-          ? `<div class="muted" style="margin-top:4px">暂未在华南MALL / 东城万达 / 民盈国贸城查到开售排片。</div>`
-          : cinemaMatches
-              .map(
-                ({ cinema, movie }) =>
-                  `<div class="muted" style="margin-top:4px">• <strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场（${(movie.shows || []).slice(0, 3).map((s) => `${s.dt.slice(5)} ${s.tm}${s.tags?.length ? `[${s.tags[0]}]` : ''}`).join('、')}）</div>`
-              )
-              .join('')
-      }
+        <div class="section-label">四平台开分</div>
+        <div class="score-grid">
+          <div class="metric-box">
+            <div class="metric-label"><span>猫眼评分</span></div>
+            <div class="metric-val" style="color:${maoyanScore > 0 ? 'var(--gold)' : 'var(--text-muted)'}">${maoyanScore > 0 ? maoyanScore : '未开分'}</div>
+            <div class="metric-sub">${intel.maoyanVotes ? `${formatWishCount(intel.maoyanVotes)} 人评` : '官方评分'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label"><span>豆瓣评分</span>${intel.doubanUrl ? `<a class="link-clean" href="${escapeHtml(intel.doubanUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
+            <div class="metric-val" style="color:${intel.doubanScore > 0 ? 'var(--green)' : 'var(--text-muted)'}">${intel.doubanScore > 0 ? intel.doubanScore : '未开分'}</div>
+            <div class="metric-sub">${intel.doubanVotes ? `${formatWishCount(intel.doubanVotes)} 人评` : '待抓取或未开分'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label"><span>IMDb</span>${intel.imdbUrl ? `<a class="link-clean" href="${escapeHtml(intel.imdbUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
+            <div class="metric-val" style="color:${intel.imdbScore > 0 ? 'var(--blue)' : 'var(--text-muted)'}">${intel.imdbScore > 0 ? `${intel.imdbScore}` : '未开分'}</div>
+            <div class="metric-sub">${intel.imdbVotes ? `${formatWishCount(intel.imdbVotes)} votes` : (intel.enm ? '待抓取或未开分' : '需英文片名匹配')}</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label"><span>烂番茄</span>${intel.rtUrl ? `<a class="link-clean" href="${escapeHtml(intel.rtUrl)}" target="_blank" rel="noopener">详情↗</a>` : ''}</div>
+            <div class="metric-val" style="color:${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? 'var(--accent)' : 'var(--text-muted)'}">${intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `${intel.rtCriticsScore}%` : '未开分'}</div>
+            <div class="metric-sub">${intel.rtAudienceScore !== null && intel.rtAudienceScore !== undefined ? `爆米花 ${intel.rtAudienceScore}%` : '新鲜度 / 爆米花'}</div>
+          </div>
+        </div>
 
-      <div class="row" style="margin-top:14px">
-        <button class="btn ${isStarred ? 'btn-gold' : 'btn-primary'}" style="flex:1" id="detailStarActionBtn" type="button">
-          ${isStarred ? '★ 调整星标 / 停止提醒' : '★ 星标盯每轮开票'}
-        </button>
+        <div class="section-label">东莞三家影院当前排片</div>
+        <div class="card-subtle" style="margin-top:6px">
+          ${
+            cinemaMatches.length === 0
+              ? `<div class="muted">暂未在华南MALL / 东城万达 / 民盈国贸城查到开售排片。</div>`
+              : cinemaMatches
+                  .map(
+                    ({ cinema, movie }) =>
+                      `<div class="muted" style="margin:3px 0;color:var(--text)"><strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场（${(movie.shows || []).slice(0, 3).map((s) => `${s.dt.slice(5)} ${s.tm}${s.tags?.length ? `[${s.tags[0]}]` : ''}`).join('、')}）</div>`
+                  )
+                  .join('')
+          }
+        </div>
+
+        <div class="row" style="margin-top:14px">
+          <button class="btn ${isStarred ? 'btn-gold' : 'btn-primary'}" style="flex:1;min-height:44px" id="detailStarActionBtn" type="button">
+            ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '调整星标设置 / 停止提醒' : '星标盯每轮开票'}
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -337,8 +367,13 @@ function checkIncomingPairingHash() {
   if (!hash.startsWith('#pair=')) return;
   try {
     applyPairingPayload(hash);
-    history.replaceState(null, '', window.location.pathname + window.location.search);
-    showToast('已导入朋友配对配置！请点击「提醒与设置」开启本机通知', 4200);
+    if (detectPlatform().isWeChat) {
+      // Preserve #pair= inside WeChat so tapping "在默认浏览器打开" carries the full pairing URL
+      appState.incomingWeChatPairLink = window.location.href;
+    } else {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+      showToast('已导入朋友配对配置！请点下方开启本机通知', 4200);
+    }
   } catch (err) {
     console.warn('Pairing hash parse failed:', err);
   }
@@ -705,36 +740,38 @@ function openStarModal({ movieId = null, title = '', poster = '', keyword = '' }
   root.classList.remove('hidden');
   root.innerHTML = `
     <div class="modal-sheet">
-      <div class="row-between" style="margin-bottom:10px">
-        <div class="card-title">★ 星标盯票：《${escapeHtml(title || keyword)}》</div>
-        <button class="btn btn-sm" id="closeModalBtn" type="button">关闭</button>
-      </div>
-      <p class="muted" style="margin:0 0 12px">
-        星标后，只要你未手动停止，三家东莞影院（华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV）每一轮新放票都会合并推一条提醒。
-      </p>
-      <div class="field">
-        <label>要盯的影厅范围</label>
-        <select id="modalHallFilter" class="select">
-          <option value="all" ${existingWatch?.hallFilter === 'all' ? 'selected' : ''}>全部影厅（默认，特殊厅自动高亮）</option>
-          <option value="special" ${existingWatch?.hallFilter === 'special' ? 'selected' : ''}>仅特殊厅（IMAX GT / IMAX / 4DX / ScreenX / 杜比）</option>
-          <option value="imax" ${existingWatch?.hallFilter === 'imax' ? 'selected' : ''}>仅 IMAX（含 IMAX GT）</option>
-          <option value="imax_gt" ${existingWatch?.hallFilter === 'imax_gt' ? 'selected' : ''}>只盯 华南MALL IMAX GT 厅</option>
-        </select>
-      </div>
-      ${
-        totalOpenShows > 0
-          ? `<div class="field">
-              <label>当前三家影院已有 ${totalOpenShows} 场排片</label>
-              <select id="modalBaseline" class="select">
-                <option value="skip">跳过当前已有场次，仅提醒后续新一轮开票（推荐）</option>
-                <option value="include">连同当前已有场次也立即推一次</option>
-              </select>
-            </div>`
-          : ''
-      }
-      <div class="row" style="margin-top:14px">
-        <button class="btn btn-gold" style="flex:1" id="confirmStarBtn" type="button">${existingWatch ? '更新盯票设置' : '确认星标盯票'}</button>
-        ${existingWatch ? `<button class="btn btn-danger" id="modalStopBtn" type="button">停止提醒</button>` : ''}
+      <div class="modal-sheet-pad">
+        <div class="row-between" style="margin-bottom:10px">
+          <div class="card-title">${icon('starFill')} 星标盯票：《${escapeHtml(title || keyword)}》</div>
+          <button class="btn btn-soft btn-sm" id="closeModalBtn" type="button">关闭</button>
+        </div>
+        <p class="muted" style="margin:0 0 14px">
+          星标后，只要你未手动停止，华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV 每一轮新放票及该片的定档/开票/改档/开分都会推送提醒。
+        </p>
+        <div class="field">
+          <label>要盯的影厅范围</label>
+          <select id="modalHallFilter" class="select">
+            <option value="all" ${existingWatch?.hallFilter === 'all' ? 'selected' : ''}>全部影厅（默认，特殊厅自动高亮）</option>
+            <option value="special" ${existingWatch?.hallFilter === 'special' ? 'selected' : ''}>仅特殊厅（IMAX GT / IMAX / 4DX / ScreenX / 杜比）</option>
+            <option value="imax" ${existingWatch?.hallFilter === 'imax' ? 'selected' : ''}>仅 IMAX（含 IMAX GT）</option>
+            <option value="imax_gt" ${existingWatch?.hallFilter === 'imax_gt' ? 'selected' : ''}>只盯 华南MALL IMAX GT 厅</option>
+          </select>
+        </div>
+        ${
+          totalOpenShows > 0
+            ? `<div class="field">
+                <label>当前三家影院已有 ${totalOpenShows} 场排片</label>
+                <select id="modalBaseline" class="select">
+                  <option value="skip">跳过当前已有场次，仅提醒后续新一轮开票（推荐）</option>
+                  <option value="include">连同当前已有场次也立即推一次</option>
+                </select>
+              </div>`
+            : ''
+        }
+        <div class="row" style="margin-top:16px">
+          <button class="btn btn-primary" style="flex:1;min-height:44px" id="confirmStarBtn" type="button">${existingWatch ? '更新盯票设置' : '确认星标盯票'}</button>
+          ${existingWatch ? `<button class="btn btn-danger" style="min-height:44px" id="modalStopBtn" type="button">停止提醒</button>` : ''}
+        </div>
       </div>
     </div>
   `;
@@ -840,13 +877,29 @@ function renderDeviceBanner() {
   const el = document.getElementById('deviceBanner');
   const plat = detectPlatform();
 
+  if (plat.isWeChat) {
+    const shareUrl = appState.incomingWeChatPairLink || window.location.href;
+    el.className = 'banner warn';
+    el.innerHTML = `
+      <div class="banner-title">
+        <span>微信内无法添加桌面与推送提醒</span>
+        ${appState.incomingWeChatPairLink ? `<button class="btn btn-sm btn-primary" id="bannerCopyWechatPairBtn" type="button">${icon('link')} 复制链接</button>` : ''}
+      </div>
+      <div>请点右上角 <strong>··· →「在默认浏览器打开」</strong>（如华为浏览器或 Safari），已保留你的配对参数；若从浏览器打开后未自动配对，可先复制链接到「设置 → 一键导入」。</div>
+    `;
+    document.getElementById('bannerCopyWechatPairBtn')?.addEventListener('click', () => {
+      copyText(shareUrl, '完整配对链接');
+    });
+    return;
+  }
+
   if (plat.isIOS && !plat.isStandalone) {
     el.className = 'banner';
     el.innerHTML = `
       <div class="banner-title">
-        <span>📱 iPhone 锁屏直接提醒指引</span>
+        <span>添加到 iPhone 主屏幕以开启提醒</span>
       </div>
-      <div>Safari 网页直接打开无法推送，请点底部 <strong>分享按钮 ⬆️ →「添加到主屏幕」</strong>，再从桌面图标打开即可开启 <strong>iPhone 原生锁屏 Web Push</strong>。</div>
+      <div class="muted">Safari 网页直接打开无法推送，请点底部 <strong>分享按钮 →「添加到主屏幕」</strong>，再从桌面图标打开即可开启原生锁屏推送。</div>
     `;
     return;
   }
@@ -855,16 +908,16 @@ function renderDeviceBanner() {
     el.className = 'banner';
     el.innerHTML = `
       <div class="banner-title">
-        <span>📲 iPhone PWA 已就绪</span>
-        <button class="btn btn-primary btn-sm" id="bannerSubscribeBtn" type="button">开启锁屏提醒</button>
+        <span>iPhone 锁屏提醒未开启</span>
+        <button class="btn btn-primary btn-sm" id="bannerSubscribeBtn" type="button">${icon('bell')} 立即开启</button>
       </div>
-      <div class="muted">点击开启后，每一轮开票都会通过苹果 APNs 推送到锁屏（需先完成「提醒与设置」里的 Gist 配对）。</div>
+      <div class="muted">开启后，星标电影每轮放票及定档/开分都会直接推到锁屏。</div>
     `;
     document.getElementById('bannerSubscribeBtn').onclick = () => {
       if (!isPaired()) {
         appState.tab = 'settings';
         render();
-        showToast('请先填入 Token 和 Gist ID 完成配对');
+        showToast('请先在设置完成配对或粘贴导入链接');
       } else {
         subscribeDeviceWebPush();
       }
@@ -876,10 +929,10 @@ function renderDeviceBanner() {
     el.className = 'banner warn';
     el.innerHTML = `
       <div class="banner-title">
-        <span>📱 华为设备提醒适配提示</span>
-        <button class="btn btn-gold btn-sm" id="bannerGoHuaweiBtn" type="button">去开启适配</button>
+        <span>华为设备建议开启防漏提醒</span>
+        <button class="btn btn-gold btn-sm" id="bannerGoHuaweiBtn" type="button">${icon('shield')} 去开启</button>
       </div>
-      <div class="muted">国行华为无 Google GMS，杀后台后纯网页标准 Push 易丢包。建议开启「华为网页哨兵模式」或填写微信 PushPlus 兜底，确保开票必达。</div>
+      <div class="muted">国行华为建议开启「网页哨兵模式」或填写 PushPlus 微信提醒，避免切后台后漏收开票通知。</div>
     `;
     document.getElementById('bannerGoHuaweiBtn').onclick = () => {
       appState.tab = 'settings';
@@ -943,75 +996,78 @@ function renderRadarTab(root) {
   );
 
   root.innerHTML = `
-    <div class="stats-grid">
+    <div class="stats-strip">
       <div class="stat-tile">
-        <div class="stat-val">${activeItems.length}</div>
+        <div class="stat-val accent">${activeItems.length}</div>
         <div class="stat-lbl">星标盯票中</div>
       </div>
       <div class="stat-tile">
         <div class="stat-val">${totalShows}</div>
-        <div class="stat-lbl">三影院在售场次</div>
+        <div class="stat-lbl">三影院在售</div>
       </div>
       <div class="stat-tile">
         <div class="stat-val">${alerts.length}</div>
-        <div class="stat-lbl">已捕获开票波次</div>
+        <div class="stat-lbl">已捕获波次</div>
       </div>
     </div>
 
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">快速星标电影（支持未定档片名）</div>
-          <div class="muted">输入片名关键词（如「阿凡达」「星际穿越」）即可开始每轮追踪</div>
+          <div class="card-title">快速星标电影</div>
+          <div class="muted">支持未定档关键词，匹配即自动追踪三影院每轮放票</div>
         </div>
-        <button class="btn btn-primary btn-sm" id="manualTickBtn" type="button">立即抓一次</button>
+        <button class="btn btn-soft btn-sm" id="manualTickBtn" type="button">${icon('refresh')} 立即抓一次</button>
       </div>
       <div class="row">
-        <input id="quickKeywordInput" class="input" style="flex:1" placeholder="输入电影名关键词，或从「新片片单」一键星标" />
-        <button class="btn btn-gold" id="quickStarBtn" type="button">★ 星标</button>
+        <div class="search-wrap" style="flex:1">
+          <span class="search-ico">${icon('search')}</span>
+          <input id="quickKeywordInput" class="input" placeholder="输入电影名，或去片单直接点星标" />
+        </div>
+        <button class="btn btn-primary" id="quickStarBtn" type="button">${icon('star')} 星标</button>
       </div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <div class="card-title">★ 正在持续盯票（${activeItems.length}）</div>
-        <button class="btn btn-sm" id="refreshBtn" type="button">刷新状态</button>
+        <div class="card-title">正在持续盯票（${activeItems.length}）</div>
+        <button class="btn btn-soft btn-sm" id="refreshBtn" type="button">${icon('refresh')} 刷新</button>
       </div>
       ${
         activeItems.length === 0
-          ? `<div class="muted" style="padding:10px 0">当前没有星标电影。请去「三家影院」或「新片片单」点击 ★ 星标，或在上方直接输入片名。无星标时后台自动进入 0 风控休眠模式。</div>`
+          ? `<div class="muted" style="padding:8px 0">当前没有星标电影。可前往「片单」或「影院」点击星标，或在上方输入关键词。</div>`
           : activeItems
               .map((w) => {
                 const matches = findCurrentMovieMatchesAcrossCinemas(w);
                 const summaryHtml =
                   matches.length === 0
-                    ? `<div class="muted" style="margin-top:6px">暂未在三家影院发现排片，后台每轮 Cron 持续盯梢中...</div>`
+                    ? `<div class="muted" style="margin-top:5px">暂未发现东莞排片，后台持续盯梢中...</div>`
                     : matches
                         .map(({ cinema, movie }) => {
                           const specialCount = (movie.shows || []).filter((s) => s.isSpecial).length;
-                          return `<div class="muted" style="margin-top:4px">• <strong>${escapeHtml(cinema.shortName)}</strong>：当前 ${movie.showCount} 场${specialCount > 0 ? `（含 ${specialCount} 场特殊厅）` : ''}</div>`;
+                          return `<div class="muted" style="margin-top:3px;color:var(--text)">• <strong>${escapeHtml(cinema.shortName)}</strong>：${movie.showCount} 场${specialCount > 0 ? `（含 ${specialCount} 场特殊厅）` : ''}</div>`;
                         })
                         .join('');
                 return `
-                  <div class="card" style="background:rgba(255,255,255,0.03);margin-bottom:10px">
+                  <div class="card-subtle">
                     <div class="movie-card">
                       ${
                         w.poster
-                          ? `<img class="poster" src="${escapeHtml(w.poster)}" alt="" loading="lazy" />`
-                          : `<div class="poster-placeholder">🎞️</div>`
+                          ? `<img class="poster open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}" src="${escapeHtml(w.poster)}" alt="" loading="lazy" />`
+                          : `<div class="poster-placeholder">${icon('film')}</div>`
                       }
                       <div class="movie-body">
                         <div class="row-between">
                           <div class="movie-name clickable-title open-detail-trigger" data-mid="${w.movieId || ''}" data-title="${escapeHtml(w.title || w.keyword)}" data-poster="${escapeHtml(w.poster || '')}">${escapeHtml(w.title || w.keyword)}</div>
                           <span class="badge badge-imax">已推 ${w.roundCount || 0} 轮</span>
                         </div>
-                        <div class="row" style="margin-bottom:4px">
+                        <div class="row" style="margin:3px 0 4px">
                           <span class="badge badge-gt">${escapeHtml(hallFilterLabel(w.hallFilter))}</span>
                           ${w.lastAlertAt ? `<span class="muted">上次提醒 ${formatRelTime(w.lastAlertAt)}</span>` : ''}
                         </div>
                         ${summaryHtml}
                         <div class="row" style="margin-top:10px">
-                          <button class="btn btn-danger btn-sm stop-watch-btn" data-id="${escapeHtml(w.id)}" type="button">手动停止提醒</button>
+                          <button class="btn btn-danger btn-sm stop-watch-btn" data-id="${escapeHtml(w.id)}" type="button">停止提醒</button>
                         </div>
                       </div>
                     </div>
@@ -1029,13 +1085,13 @@ function renderRadarTab(root) {
             ${stoppedItems
               .map(
                 (w) => `
-              <div class="row-between" style="padding:8px 0;border-bottom:1px solid var(--border)">
+              <div class="row-between" style="padding:9px 0;border-bottom:1px solid var(--border)">
                 <div>
-                  <div style="font-weight:600">${escapeHtml(w.title || w.keyword)}</div>
-                  <div class="muted">历史提醒 ${w.roundCount || 0} 轮 · ${escapeHtml(hallFilterLabel(w.hallFilter))}</div>
+                  <div style="font-weight:600;font-size:14px">${escapeHtml(w.title || w.keyword)}</div>
+                  <div class="muted">历史 ${w.roundCount || 0} 轮 · ${escapeHtml(hallFilterLabel(w.hallFilter))}</div>
                 </div>
                 <div class="row">
-                  <button class="btn btn-sm resume-watch-btn" data-id="${escapeHtml(w.id)}" type="button">恢复盯票</button>
+                  <button class="btn btn-soft btn-sm resume-watch-btn" data-id="${escapeHtml(w.id)}" type="button">恢复</button>
                   <button class="btn btn-danger btn-sm del-watch-btn" data-id="${escapeHtml(w.id)}" type="button">删除</button>
                 </div>
               </div>
@@ -1048,12 +1104,12 @@ function renderRadarTab(root) {
 
     <div class="card">
       <div class="card-header">
-        <div class="card-title">📣 每一轮开票播报历史</div>
-        <span class="muted">一轮合并一条</span>
+        <div class="card-title">开票播报历史</div>
+        <span class="muted">每轮一条摘要</span>
       </div>
       ${
         alerts.length === 0
-          ? `<div class="muted" style="padding:8px 0">暂无播报记录。当星标电影新开售场次时，这里会完整记录每一轮详情。</div>`
+          ? `<div class="muted" style="padding:6px 0">暂无播报记录。星标电影新开售场次时会记录在这里。</div>`
           : alerts
               .slice(0, 15)
               .map(
@@ -1136,14 +1192,14 @@ function renderCinemasTab(root) {
       ).join('')}
     </div>
 
-    <div class="card" style="padding:10px 14px">
+    <div class="card" style="padding:13px 15px">
       <div class="row-between">
         <div>
           <div style="font-weight:700;font-size:14px">${escapeHtml(CINEMAS.find((c) => c.id === appState.activeCinemaId)?.name)}</div>
           <div class="muted">更新于 ${escapeHtml(formatRelTime(cinemaData?.fetchedAt))} · 在售影片 ${movies.length} 部</div>
         </div>
-        <button class="btn btn-sm" id="specialToggleBtn" type="button">
-          ${appState.specialHallOnly ? '✨ 仅看特殊厅' : '全部影厅'}
+        <button class="btn ${appState.specialHallOnly ? 'btn-primary' : 'btn-soft'} btn-sm" id="specialToggleBtn" type="button">
+          ${appState.specialHallOnly ? '仅看特殊厅' : '全部影厅'}
         </button>
       </div>
       ${
@@ -1162,7 +1218,7 @@ function renderCinemasTab(root) {
 
     ${
       movies.length === 0
-        ? `<div class="card"><div class="muted">暂无排片缓存，请前往「提醒与设置」配置后点「立即抓一次」，或稍等 Cron 首轮抓取完成。</div></div>`
+        ? `<div class="card"><div class="muted">暂无排片缓存，请前往「设置」配对后点击「立即抓一次」。</div></div>`
         : movies
             .map((m) => {
               const filteredShows = (m.shows || []).filter((s) => {
@@ -1184,15 +1240,15 @@ function renderCinemasTab(root) {
                   <div class="movie-card">
                     ${
                       m.img
-                        ? `<img class="poster" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">🎬</div>`
+                        ? `<img class="poster open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
+                        : `<div class="poster-placeholder">${icon('film')}</div>`
                     }
                     <div class="movie-body">
                       <div class="row-between">
                         <div class="movie-name clickable-title open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
-                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : ''} star-movie-btn"
+                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-soft'} star-movie-btn"
                           data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                          ${isStarred ? '★ 已星标' : '☆ 星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
                         </button>
                       </div>
                       <div class="muted">${escapeHtml(m.desc || '')}</div>
@@ -1267,12 +1323,12 @@ function renderDynamicsTab(root) {
 
   root.innerHTML = `
     <div class="card">
-      <div class="row-between" style="margin-bottom:8px">
+      <div class="row-between" style="margin-bottom:10px">
         <div>
-          <div class="card-title">🔥 新片全网动态（定档 / 开票 / 改档 / 开分）</div>
-          <div class="muted">每 5 分钟自动巡检全量新片（猫眼/淘票票/豆瓣/IMDb/烂番茄） · 上次同步 ${escapeHtml(lastCatSync)}</div>
+          <div class="card-title">新片全网动态</div>
+          <div class="muted">每 5 分钟同步全量新片定档/开票/改档/开分 · ${escapeHtml(lastCatSync)}（仅星标片会触发推送）</div>
         </div>
-        <button class="btn btn-primary btn-sm" id="dynSyncBtn" type="button">立即全量刷新</button>
+        <button class="btn btn-soft btn-sm" id="dynSyncBtn" type="button">${icon('refresh')} 刷新</button>
       </div>
       <div class="pill-group" style="margin-bottom:0">
         <button class="chip ${appState.dynamicsFilter === 'all' ? 'active' : ''}" data-df="all" type="button">全部 (${dynamics.length})</button>
@@ -1285,7 +1341,7 @@ function renderDynamicsTab(root) {
 
     ${
       filtered.length === 0
-        ? `<div class="card"><div class="muted" style="padding:10px 0">暂无新动态记录。全量片单建立基线后，每当任何新电影出现定档、开票、改档或猫眼/豆瓣/IMDb/烂番茄开分时，这里会立即记录并推送提醒！可点右上角「立即全量刷新」触发一次同步。</div></div>`
+        ? `<div class="card"><div class="muted" style="padding:8px 0">暂无新动态记录。每当新电影出现定档、开票、改档或开分时都会记录在这里，星标片会同步推提醒。</div></div>`
         : filtered
             .map((d) => {
               const isStarred = watchlist.some(
@@ -1297,20 +1353,20 @@ function renderDynamicsTab(root) {
                     ${
                       d.poster
                         ? `<img class="poster open-detail-trigger" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster)}" src="${escapeHtml(d.poster)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">🔥</div>`
+                        : `<div class="poster-placeholder">${icon('film')}</div>`
                     }
                     <div class="movie-body">
                       <div class="row-between">
-                        <div class="row" style="gap:6px">
+                        <div class="row" style="gap:6px;min-width:0;flex:1">
                           <span class="badge dyn-${escapeHtml(d.type)}">${escapeHtml(d.typeLabel)}</span>
-                          <span class="movie-name clickable-title open-detail-trigger" style="margin:0" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">${escapeHtml(d.title)}</span>
+                          <span class="movie-name clickable-title open-detail-trigger" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}">${escapeHtml(d.title)}</span>
                         </div>
-                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : ''} star-dyn-btn"
+                        <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-soft'} star-dyn-btn"
                           data-mid="${d.movieId || ''}" data-title="${escapeHtml(d.title)}" data-poster="${escapeHtml(d.poster || '')}" type="button">
-                          ${isStarred ? '★ 已星标' : '☆ 星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
                         </button>
                       </div>
-                      <div style="margin-top:6px;font-size:13px;font-weight:600">${escapeHtml(d.summary)}</div>
+                      <div style="margin-top:6px;font-size:13px;font-weight:600;color:var(--text)">${escapeHtml(d.summary)}</div>
                       <div class="row-between" style="margin-top:4px">
                         <span class="muted">${escapeHtml(d.detail || '')}</span>
                         <span class="muted">${escapeHtml(formatRelTime(d.createdAt))}</span>
@@ -1384,22 +1440,25 @@ function renderCatalogTab(root) {
 
   root.innerHTML = `
     <div class="card">
-      <div class="row-between" style="margin-bottom:8px">
-        <div class="muted">全量片单共 ${comingList.length + onInfoList.length} 部（每5分钟自动更新；点片名看猫眼/淘票票想看与四平台评分）</div>
-        <button class="btn btn-sm" id="syncCatalogBtn" type="button">刷新片单</button>
+      <div class="row-between" style="margin-bottom:10px">
+        <div class="muted">全量片单共 <strong>${comingList.length + onInfoList.length}</strong> 部 · 点片名查看双平台想看与评分</div>
+        <button class="btn btn-soft btn-sm" id="syncCatalogBtn" type="button">${icon('refresh')} 刷新</button>
       </div>
-      <div class="pill-group" style="margin-bottom:10px">
-        <button class="chip ${appState.catalogTab === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">即将上映 (${comingList.length})</button>
-        <button class="chip ${appState.catalogTab === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">正在热映 (${onInfoList.length})</button>
-        <button class="chip ${appState.catalogTab === 'wish_total' ? 'active' : ''}" data-ctab="wish_total" type="button">📈 想看总榜</button>
-        <button class="chip ${appState.catalogTab === 'wish_daily' ? 'active' : ''}" data-ctab="wish_daily" type="button">🚀 日增排名</button>
+      <div class="segmented">
+        <button class="seg-btn ${appState.catalogTab === 'coming' ? 'active' : ''}" data-ctab="coming" type="button">待映 (${comingList.length})</button>
+        <button class="seg-btn ${appState.catalogTab === 'onInfo' ? 'active' : ''}" data-ctab="onInfo" type="button">热映 (${onInfoList.length})</button>
+        <button class="seg-btn ${appState.catalogTab === 'wish_total' ? 'active' : ''}" data-ctab="wish_total" type="button">想看总榜</button>
+        <button class="seg-btn ${appState.catalogTab === 'wish_daily' ? 'active' : ''}" data-ctab="wish_daily" type="button">日增排名</button>
       </div>
-      <input id="catalogSearchInput" class="input" value="${escapeHtml(appState.catalogSearch)}" placeholder="筛选片名（没找到可在「盯票」页输关键词）" />
+      <div class="search-wrap">
+        <span class="search-ico">${icon('search')}</span>
+        <input id="catalogSearchInput" class="input" value="${escapeHtml(appState.catalogSearch)}" placeholder="搜索片名（新片可去盯票页关键词追踪）" />
+      </div>
     </div>
 
     ${
       filtered.length === 0
-        ? `<div class="card"><div class="muted">暂无匹配片单。你可以直接切换到「盯票」页用关键词手动星标，或点击「刷新片单」。</div></div>`
+        ? `<div class="card"><div class="muted">暂无匹配片单。你可以直接切换到「盯票」页用关键词手动星标，或点击「刷新」。</div></div>`
         : filtered
             .map((m, idx) => {
               const isStarred = watchlist.some(
@@ -1414,6 +1473,7 @@ function renderCatalogTab(root) {
                 intel.imdbScore > 0 ? `IMDb ${intel.imdbScore}` : '',
                 intel.rtCriticsScore !== null && intel.rtCriticsScore !== undefined ? `烂番茄 ${intel.rtCriticsScore}%` : ''
               ].filter(Boolean);
+              const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
 
               return `
                 <div class="card">
@@ -1421,20 +1481,20 @@ function renderCatalogTab(root) {
                     ${
                       m.img
                         ? `<img class="poster open-detail-trigger" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img)}" src="${escapeHtml(m.img)}" alt="" loading="lazy" />`
-                        : `<div class="poster-placeholder">🍿</div>`
+                        : `<div class="poster-placeholder">${icon('film')}</div>`
                     }
                     <div class="movie-body">
                       <div class="row-between">
                         <div class="row" style="gap:6px;min-width:0;flex:1">
-                          ${isRankMode ? `<span class="rank-num ${idx < 3 ? 'top3' : ''}">#${idx + 1}</span>` : ''}
-                          <div class="movie-name clickable-title open-detail-trigger" style="margin:0" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
+                          ${isRankMode ? `<span class="rank-num ${rankClass}">#${idx + 1}</span>` : ''}
+                          <div class="movie-name clickable-title open-detail-trigger" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}">${escapeHtml(m.nm)}</div>
                         </div>
                         <button class="btn btn-sm ${isStarred ? 'btn-gold' : 'btn-primary'} star-cat-btn"
                           data-mid="${m.id}" data-title="${escapeHtml(m.nm)}" data-poster="${escapeHtml(m.img || '')}" type="button">
-                          ${isStarred ? '★ 已星标' : '★ 星标'}
+                          ${icon(isStarred ? 'starFill' : 'star')} ${isStarred ? '已星标' : '星标'}
                         </button>
                       </div>
-                      <div class="row" style="margin:5px 0">
+                      <div class="row" style="margin:6px 0;gap:5px">
                         <span class="badge badge-normal">${escapeHtml(m.statusLabel || '')}</span>
                         ${hasImax ? `<span class="badge badge-imax">IMAX</span>` : ''}
                         <span class="badge badge-gt">猫眼想看 ${formatWishCount(m.wish)}</span>
@@ -1442,8 +1502,12 @@ function renderCatalogTab(root) {
                         ${Number(m.wishDailyGain || 0) > 0 ? `<span class="badge dyn-presale_opened">今日 +${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
                         ${m.rt ? `<span class="muted">${escapeHtml(m.rt)}</span>` : ''}
                       </div>
-                      ${scorePills.length > 0 ? `<div class="muted" style="color:#ddd6fe;margin-bottom:2px">⭐ ${escapeHtml(scorePills.join(' · '))}</div>` : ''}
-                      <div class="muted">${escapeHtml(m.star || '')}</div>
+                      ${
+                        scorePills.length > 0
+                          ? `<div class="score-mini-row">${scorePills.map((sp) => `<span class="score-mini">${escapeHtml(sp)}</span>`).join('')}</div>`
+                          : ''
+                      }
+                      ${m.star ? `<div class="muted" style="margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(m.star)}</div>` : ''}
                     </div>
                   </div>
                 </div>
@@ -1506,28 +1570,28 @@ function renderSettingsTab(root) {
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">1. 本机 Web App 推送（iPhone & 华为）</div>
-          <div class="muted">当前环境：${
+          <div class="card-title">${icon('bell')} 本机通知推送</div>
+          <div class="muted">${
             plat.isIOS
               ? plat.isStandalone
-                ? 'iPhone PWA 主屏幕模式 (支持 APNs 锁屏直推)'
-                : 'iPhone Safari 浏览器（请先添加到主屏幕）'
+                ? 'iPhone 桌面模式 · 支持锁屏直推'
+                : 'iPhone Safari · 请先添加到主屏幕'
               : plat.isHuawei
-                ? '华为 / 鸿蒙浏览器（建议配合下方哨兵或微信兜底）'
-                : '桌面 / 其他移动浏览器'
-          } · 已绑定设备数：${subs.length}</div>
+                ? '华为设备 · 建议配合作下方哨兵与微信'
+                : '当前浏览器'
+          } · 已绑定 ${subs.length} 台设备</div>
         </div>
       </div>
       <div class="row">
         <button class="btn btn-primary" id="subWebPushBtn" type="button">
-          ${appState.pushSub ? '🔄 重新订阅本机 Web Push' : '🔔 开启本机 Web App 推送'}
+          ${icon('bell')} ${appState.pushSub ? '重新开启本机推送' : '开启本机推送'}
         </button>
-        <button class="btn" id="testSoundBtn" type="button">🔊 测试提示音</button>
-        <button class="btn" id="testRemotePushBtn" type="button">🚀 全通道测试推送</button>
+        <button class="btn btn-soft" id="testSoundBtn" type="button">${icon('volume')} 测提示音</button>
+        <button class="btn btn-soft" id="testRemotePushBtn" type="button">${icon('send')} 发测试推送</button>
       </div>
       ${
         subs.length > 0
-          ? `<div class="muted" style="margin-top:8px">已订阅设备：${subs.map((s) => `${escapeHtml(s.deviceLabel)}`).join('、')}</div>`
+          ? `<div class="muted" style="margin-top:10px">已绑定设备：${subs.map((s) => `${escapeHtml(s.deviceLabel)}`).join('、')}</div>`
           : ''
       }
     </div>
@@ -1535,164 +1599,171 @@ function renderSettingsTab(root) {
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">2. 华为适配：网页哨兵保活 & 微信/飞书兜底</div>
-          <div class="muted">国行华为无 Google GMS，浏览器被杀后台时标准 Web Push 无法唤醒；开启下面任意一项即可 100% 不漏票</div>
+          <div class="card-title">${icon('shield')} 华为保活 & 微信兜底通知</div>
+          <div class="muted">华为若被系统清理后台，开启网页哨兵或 PushPlus 微信提醒可确保 100% 收到</div>
         </div>
       </div>
-      <div class="row" style="margin-bottom:10px">
-        <button class="btn ${appState.sentinel.enabled ? 'btn-gold' : ''}" id="toggleSentinelBtn" type="button">
-          ${appState.sentinel.enabled ? '✅ 网页哨兵巡检中 (45s)' : '🛡️ 开启华为网页哨兵模式'}
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn ${appState.sentinel.enabled ? 'btn-gold' : 'btn-soft'}" id="toggleSentinelBtn" type="button">
+          ${icon('shield')} ${appState.sentinel.enabled ? '网页哨兵巡检中 (45s)' : '开启华为网页哨兵'}
         </button>
-        <button class="btn ${appState.sentinel.keepAwake ? 'btn-primary' : ''}" id="toggleWakeLockBtn" type="button">
-          ${appState.sentinel.keepAwake ? '☀️ 防息屏已开启' : '防息屏常亮'}
+        <button class="btn ${appState.sentinel.keepAwake ? 'btn-primary' : 'btn-soft'}" id="toggleWakeLockBtn" type="button">
+          ${icon('sun')} ${appState.sentinel.keepAwake ? '防息屏已开启' : '屏幕常亮'}
         </button>
-      </div>
-      <div class="muted" style="margin-bottom:12px">
-        华为手机设置建议：在华为浏览器点右上角菜单「添加到桌面」，并在手机「设置 → 应用 → 耗电管理」改为手动管理（允许后台活动），开着页面放后台也不易被清。
       </div>
 
       <div class="field">
-        <label>PushPlus Token（强烈推荐给华为朋友：微信扫码即收，完全免翻墙/不杀后台）</label>
+        <label>微信 PushPlus Token（强烈推荐华为使用：微信扫码即收，无需后台常驻）</label>
         <input id="whPushplus" class="input" value="${escapeHtml(wh.pushplusToken || '')}" placeholder="在 pushplus.plus 微信扫码获取 token" />
       </div>
-      <div class="field">
-        <label>企业微信群机器人 Webhook（可选）</label>
-        <input id="whWecom" class="input" value="${escapeHtml(wh.wecomWebhook || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+
+      <details class="disclosure">
+        <summary>更多群机器人通道（企微 / 飞书 / 钉钉 / Bark）</summary>
+        <div class="disclosure-body">
+          <div class="field">
+            <label>企业微信群机器人 Webhook</label>
+            <input id="whWecom" class="input" value="${escapeHtml(wh.wecomWebhook || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+          </div>
+          <div class="field">
+            <label>飞书群机器人 Webhook</label>
+            <input id="whFeishu" class="input" value="${escapeHtml(wh.feishuWebhook || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+          </div>
+          <div class="field">
+            <label>钉钉 Webhook</label>
+            <input id="whDingtalk" class="input" value="${escapeHtml(wh.dingtalkWebhook || '')}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+          </div>
+          <div class="field">
+            <label>Bark 推送链接（iPhone 强响铃）</label>
+            <input id="whBark" class="input" value="${escapeHtml(wh.barkUrl || '')}" placeholder="https://api.day.app/你的Key/" />
+          </div>
+        </div>
+      </details>
+      <div class="row" style="margin-top:12px">
+        <button class="btn btn-primary btn-sm" id="saveWebhooksBtn" type="button">保存微信 / 兜底通道</button>
       </div>
-      <div class="field">
-        <label>飞书 / 钉钉群机器人 Webhook（可选）</label>
-        <input id="whFeishu" class="input" value="${escapeHtml(wh.feishuWebhook || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
-      </div>
-      <div class="field">
-        <label>钉钉 Webhook（可选）</label>
-        <input id="whDingtalk" class="input" value="${escapeHtml(wh.dingtalkWebhook || '')}" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
-      </div>
-      <div class="field">
-        <label>Bark 推送链接（可选，iPhone 备用强响铃）</label>
-        <input id="whBark" class="input" value="${escapeHtml(wh.barkUrl || '')}" placeholder="https://api.day.app/你的Key/" />
-      </div>
-      <button class="btn btn-primary" id="saveWebhooksBtn" type="button">保存国内兜底推送通道</button>
     </div>
 
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">3. 猫眼抓取频率、风控与动态推送范围</div>
-          <div class="muted">盯票场次：随 cron-job.org 每 1~2 分钟抓 3 家影院（无星标自动降频）；全量片单/猫眼+淘票票想看/豆瓣+IMDb+烂番茄开分：每 5 分钟自动更新</div>
+          <div class="card-title">盯票与推送策略</div>
+          <div class="muted">盯票随 Cron 每 1~2 分钟抓 3 家影院；片单、淘票票想看与开分每 5 分钟刷新</div>
         </div>
       </div>
       <div class="field">
-        <label>动态与开票推送范围（非星标新片始终记录在「动态」板块展示）</label>
+        <label>动态与开票推送范围（非星标新片始终在「动态」板块展示）</label>
         <select id="settingNotifyDynamics" class="select">
           <option value="false" ${st.notifyAllDynamics !== true ? 'selected' : ''}>仅推送我星标的电影（定档/开票/改档/开分+每轮放票，默认）</option>
           <option value="true" ${st.notifyAllDynamics === true ? 'selected' : ''}>全部新电影动态都推送（含未星标电影）</option>
         </select>
       </div>
       <div class="field">
-        <label>影院抓取节奏模式（无星标电影时均自动休眠 0 请求）</label>
+        <label>影院抓取节奏（无星标电影时自动休眠 0 请求）</label>
         <select id="settingRotateMode" class="select">
-          <option value="all" ${st.rotateMode !== 'round_robin' ? 'selected' : ''}>标准错峰：每次 Cron 随机间隔依次抓 3 家影院</option>
-          <option value="round_robin" ${st.rotateMode === 'round_robin' ? 'selected' : ''}>极限防风控轮转：每次 Cron 只抓 1 家（单 IP 密度降为 1/3）</option>
+          <option value="all" ${st.rotateMode !== 'round_robin' ? 'selected' : ''}>标准错峰：每次随机间隔抓 3 家影院</option>
+          <option value="round_robin" ${st.rotateMode === 'round_robin' ? 'selected' : ''}>低密度防风控：每次轮转抓 1 家</option>
         </select>
       </div>
       <div class="field">
-        <label>全局总开关</label>
+        <label>全局监听开关</label>
         <select id="settingPaused" class="select">
-          <option value="false" ${!st.paused ? 'selected' : ''}>正常监听（有星标电影时执行 Cron 抓取）</option>
-          <option value="true" ${st.paused ? 'selected' : ''}>手动暂停所有抓取（零请求猫眼）</option>
+          <option value="false" ${!st.paused ? 'selected' : ''}>正常监听（有星标电影即运行）</option>
+          <option value="true" ${st.paused ? 'selected' : ''}>手动暂停所有抓取</option>
         </select>
       </div>
-      <div class="field">
-        <label>可选自定义猫眼 Cookie（仅在触发风控且自动冷却仍不过时才需补充）</label>
-        <textarea id="settingCookie" class="textarea" placeholder="留空即可；如需填入则仅保存在你的私有 Gist">${escapeHtml(st.maoyanCookie || '')}</textarea>
+
+      <details class="disclosure">
+        <summary>高级：手动补充猫眼 Cookie</summary>
+        <div class="disclosure-body">
+          <div class="field">
+            <label>仅在触发风控且冷却仍不恢复时补充</label>
+            <textarea id="settingCookie" class="textarea" placeholder="通常留空即可；仅存在你的私有 Gist">${escapeHtml(st.maoyanCookie || '')}</textarea>
+          </div>
+        </div>
+      </details>
+      <div class="row" style="margin-top:12px">
+        <button class="btn btn-primary btn-sm" id="saveSettingsBtn" type="button">保存策略</button>
       </div>
-      <button class="btn btn-primary" id="saveSettingsBtn" type="button">保存防风控策略</button>
     </div>
 
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">4. GitHub 配对 & 朋友一键分享</div>
-          <div class="muted">支持直接粘贴配对链接，或手动填写 Token 与私有 Gist ID</div>
+          <div class="card-title">${icon('link')} 朋友配对与设备同步</div>
+          <div class="muted">${isPaired() ? '已完成配对 · 可一键分享给朋友或粘贴配对链接导入' : '请粘贴收到的 #pair= 配对链接一键导入'}</div>
         </div>
       </div>
+
       <div class="field">
-        <label>快速导入（把 PAIR_URL.txt 里的 #pair= 链接整条贴进来即可）</label>
+        <label>快速导入（整条粘贴朋友链接即可）</label>
         <div class="row">
           <input id="quickPairUrlInput" class="input" style="flex:1" placeholder="https://...#pair=..." />
-          <button class="btn btn-gold btn-sm" id="importPairUrlBtn" type="button">一键导入</button>
-        </div>
-      </div>
-      <div class="row" style="gap:8px">
-        <div class="field" style="flex:1;min-width:130px">
-          <label>GitHub 用户名</label>
-          <input id="cfgOwner" class="input" value="${escapeHtml(cfg.owner)}" />
-        </div>
-        <div class="field" style="flex:1;min-width:140px">
-          <label>仓库名</label>
-          <input id="cfgRepo" class="input" value="${escapeHtml(cfg.repo)}" />
-        </div>
-      </div>
-      <div class="field">
-        <label>GitHub PAT（ghp_... 或 github_pat_...，仅存本机浏览器）</label>
-        <input id="cfgToken" type="password" class="input" value="${escapeHtml(cfg.token)}" placeholder="ghp_... 或 github_pat_..." />
-      </div>
-      <div class="field">
-        <label>私有 Gist ID（填入已有 ID，或填好上方 Token 后点一键创建）</label>
-        <div class="row">
-          <input id="cfgGistId" class="input" style="flex:1" value="${escapeHtml(cfg.gistId)}" placeholder="32位私有 Gist ID" />
-          <button class="btn btn-gold btn-sm" id="autoCreateGistBtn" type="button">一键创建私有 Gist</button>
+          <button class="btn btn-primary btn-sm" id="importPairUrlBtn" type="button">一键导入</button>
         </div>
       </div>
       <div class="row" style="margin-top:8px">
-        <button class="btn btn-primary" id="savePairingBtn" type="button">保存配对并同步</button>
-        <button class="btn" id="sharePairLinkBtn" type="button">🔗 生成朋友专属配对链接</button>
+        <button class="btn btn-soft" style="flex:1" id="sharePairLinkBtn" type="button">${icon('link')} 生成朋友专属配对链接</button>
       </div>
       ${
         appState.pairingFeedback
           ? `<div class="muted" style="margin-top:8px;color:${appState.pairingFeedback.ok ? 'var(--green)' : 'var(--red)'}">${escapeHtml(appState.pairingFeedback.text)}</div>`
           : isPaired()
-            ? `<div class="muted" style="margin-top:8px;color:var(--green)">已填写配对信息（Gist: ${escapeHtml(cfg.gistId.slice(0, 8))}...，当前已订阅设备 ${subs.length} 台）</div>`
-            : `<div class="muted" style="margin-top:8px">尚未完成配对：请先粘贴上方配对链接，或填写 Token 与 Gist ID。</div>`
+            ? `<div class="muted" style="margin-top:8px;color:var(--green)">已连接私有 Gist（${escapeHtml(cfg.gistId.slice(0, 8))}...，共 ${subs.length} 台设备）</div>`
+            : `<div class="muted" style="margin-top:8px">尚未配对：请粘入配对链接，或在下方开发者配置填入参数。</div>`
       }
-    </div>
 
-    <div class="card">
-      <div class="card-header">
-        <div>
-          <div class="card-title">5. VAPID 密钥 & cron-job.org 每分钟配置</div>
-          <div class="muted">把下方 4 个 Secrets 填到 GitHub 仓库 Settings → Secrets and variables → Actions</div>
+      <details class="disclosure" ${!isPaired() ? 'open' : ''}>
+        <summary>开发者高级配置（Token / Gist / VAPID / Cron 定时）</summary>
+        <div class="disclosure-body">
+          <div class="row" style="gap:8px">
+            <div class="field" style="flex:1;min-width:130px">
+              <label>GitHub 用户名</label>
+              <input id="cfgOwner" class="input" value="${escapeHtml(cfg.owner)}" />
+            </div>
+            <div class="field" style="flex:1;min-width:140px">
+              <label>仓库名</label>
+              <input id="cfgRepo" class="input" value="${escapeHtml(cfg.repo)}" />
+            </div>
+          </div>
+          <div class="field">
+            <label>GitHub PAT（仅存本机）</label>
+            <input id="cfgToken" type="password" class="input" value="${escapeHtml(cfg.token)}" placeholder="ghp_... 或 github_pat_..." />
+          </div>
+          <div class="field">
+            <label>私有 Gist ID</label>
+            <div class="row">
+              <input id="cfgGistId" class="input" style="flex:1" value="${escapeHtml(cfg.gistId)}" placeholder="32位私有 Gist ID" />
+              <button class="btn btn-gold btn-sm" id="autoCreateGistBtn" type="button">新建 Gist</button>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;margin-bottom:14px">
+            <button class="btn btn-primary btn-sm" id="savePairingBtn" type="button">保存配对并同步</button>
+          </div>
+
+          <div class="section-label">VAPID 密钥与 cron-job.org 参数</div>
+          <div class="row" style="margin-bottom:8px">
+            <button class="btn btn-sm btn-soft" id="genVapidBtn" type="button">${icon('key')} 生成本机 VAPID 密钥</button>
+            ${vapidPub ? `<button class="btn btn-sm btn-soft" id="copyVapidPubBtn" type="button">复制公钥</button>` : ''}
+            ${appState.generatedVapid?.privateKey ? `<button class="btn btn-sm btn-soft" id="copyVapidPrivBtn" type="button">复制私钥</button>` : ''}
+          </div>
+          ${
+            vapidPub
+              ? `<div class="code-box" style="margin-bottom:10px">VAPID_PUBLIC_KEY = ${escapeHtml(vapidPub)}${
+                  appState.generatedVapid?.privateKey
+                    ? `\nVAPID_PRIVATE_KEY = ${escapeHtml(appState.generatedVapid.privateKey)}`
+                    : '\n(私钥已配置在 GitHub Secrets 中)'
+                }\nRADAR_GIST_ID = ${escapeHtml(cfg.gistId || '待配置')}</div>`
+              : ''
+          }
+          <div class="code-box">URL: ${escapeHtml(workflowDispatchUrl)}
+Method: POST · Schedule: * * * * * 或 */2 * * * *
+Body: {"ref":"main","inputs":{"mode":"tick"}}</div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn btn-sm btn-soft" id="copyCronUrlBtn" type="button">复制 URL</button>
+            <button class="btn btn-sm btn-soft" id="copyCronBodyBtn" type="button">复制 Body</button>
+          </div>
         </div>
-      </div>
-      <div class="row" style="margin-bottom:10px">
-        <button class="btn btn-sm btn-primary" id="genVapidBtn" type="button">🔑 在本机生成一对 VAPID 密钥</button>
-        ${vapidPub ? `<button class="btn btn-sm" id="copyVapidPubBtn" type="button">复制公钥</button>` : ''}
-        ${appState.generatedVapid?.privateKey ? `<button class="btn btn-sm" id="copyVapidPrivBtn" type="button">复制私钥</button>` : ''}
-      </div>
-      ${
-        vapidPub
-          ? `<div class="code-box" style="margin-bottom:10px">VAPID_PUBLIC_KEY = ${escapeHtml(vapidPub)}${
-              appState.generatedVapid?.privateKey
-                ? `\nVAPID_PRIVATE_KEY = ${escapeHtml(appState.generatedVapid.privateKey)}`
-                : '\n(私钥已配置在 GitHub Secrets 中)'
-            }\nRADAR_GIST_ID = ${escapeHtml(cfg.gistId || '请先创建私有 Gist')}\nRADAR_GH_TOKEN = 你的 Fine-Grained PAT</div>`
-          : ''
-      }
-      <div class="muted" style="margin-bottom:6px"><strong>cron-job.org 配置参数（建议设每 1 分钟或每 2 分钟）：</strong></div>
-      <div class="code-box">URL: ${escapeHtml(workflowDispatchUrl)}
-Method: POST
-Schedule: * * * * *  (每1分钟) 或 */2 * * * * (每2分钟)
-Headers:
-  Accept: application/vnd.github+json
-  Authorization: Bearer 你的_GITHUB_PAT
-  X-GitHub-Api-Version: 2022-11-28
-  Content-Type: application/json
-Body (Raw JSON):
-  {"ref":"main","inputs":{"mode":"tick"}}</div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn btn-sm" id="copyCronUrlBtn" type="button">复制 URL</button>
-        <button class="btn btn-sm" id="copyCronBodyBtn" type="button">复制 JSON Body</button>
-      </div>
+      </details>
     </div>
   `;
 
