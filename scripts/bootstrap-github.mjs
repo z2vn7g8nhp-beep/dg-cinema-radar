@@ -248,7 +248,7 @@ export async function bootstrapGitHubProject({
           'watchlist.json': { content: '[]' },
           'subscriptions.json': { content: '[]' },
           'webhooks.json': { content: '{}' },
-          'settings.json': { content: JSON.stringify({ rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', paused: false }, null, 2) },
+          'settings.json': { content: JSON.stringify({ rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: false, paused: false }, null, 2) },
           'seen.json': { content: '{}' },
           'runtime.json': { content: '{}' },
           'alerts.json': { content: '[]' }

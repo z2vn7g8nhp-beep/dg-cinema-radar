@@ -466,14 +466,14 @@ test('detectDynamicEvents catches 定档, 改档, 开票, and 开分 across Maoy
   assert.ok(alertAll);
   assert.match(alertAll.title, /新片动态/);
 
-  const alertStarOnly = buildDynamicsAlert({
+  const alertDefaultStarOnly = buildDynamicsAlert({
     events,
-    watchlist: [{ id: 'w1', movieId: 20, active: true }],
-    notifyAllDynamics: false
+    watchlist: [{ id: 'w1', movieId: 20, active: true }]
   });
-  assert.ok(alertStarOnly);
-  assert.match(alertStarOnly.body, /调档大片/);
-  assert.doesNotMatch(alertStarOnly.body, /待定新片/);
+  assert.ok(alertDefaultStarOnly);
+  assert.match(alertDefaultStarOnly.body, /调档大片/);
+  assert.doesNotMatch(alertDefaultStarOnly.body, /待定新片/);
+  assert.equal(buildDynamicsAlert({ events, watchlist: [] }), null);
 });
 
 test('taopiaopiao MTOP sign and fuzzy title matcher work cleanly', () => {

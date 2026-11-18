@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS = {
   staggerMinMs: 850,
   staggerMaxMs: 1850,
   maoyanCookie: '',
-  notifyAllDynamics: true,
+  notifyAllDynamics: false,
   paused: false
 };
 

@@ -222,7 +222,7 @@ export function detectDynamicEvents({
 /**
  * Formats 1 consolidated push notification for dynamic events (定档/开票/改档/开分).
  */
-export function buildDynamicsAlert({ events = [], watchlist = [], notifyAllDynamics = true, pageUrl = '' }) {
+export function buildDynamicsAlert({ events = [], watchlist = [], notifyAllDynamics = false, pageUrl = '' }) {
   if (!events.length) return null;
 
   const starredIds = new Set(
@@ -245,7 +245,7 @@ export function buildDynamicsAlert({ events = [], watchlist = [], notifyAllDynam
   const title =
     targetEvents.length === 1
       ? `🔥 ${targetEvents[0].typeLabel}提醒｜《${targetEvents[0].title}》`
-      : `🔥 新片动态 (${targetEvents.length}条)｜${typeTags}`;
+      : `🔥 ${notifyAllDynamics ? '新片动态' : '星标动态'} (${targetEvents.length}条)｜${typeTags}`;
 
   const lines = targetEvents.slice(0, 6).map((e) => {
     const starBadge = isStarredEvent(e) ? '★ ' : '';

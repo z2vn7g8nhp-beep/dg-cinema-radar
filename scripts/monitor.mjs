@@ -153,7 +153,7 @@ async function main() {
     rotateMode: 'all',
     staggerMinMs: 850,
     staggerMaxMs: 1850,
-    notifyAllDynamics: true,
+    notifyAllDynamics: false,
     paused: false,
     ...(privateState?.settings || {})
   };
@@ -176,7 +176,7 @@ async function main() {
     const testResult = await dispatchAlerts({
       alertPayload: {
         title: '🔔 测试提醒｜东莞三影院雷达通道正常',
-        body: `监控影院：华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV\n当前星标：${activeWatchItems.length} 部\n动态推送：${settings.notifyAllDynamics !== false ? '全量新片(定档/开票/改档/开分)' : '仅星标电影'}\n时间：${nowIso}`,
+        body: `监控影院：华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV\n当前星标：${activeWatchItems.length} 部\n动态推送：${settings.notifyAllDynamics === true ? '全量新片(定档/开票/改档/开分)' : '仅星标电影(非星标仅在动态页展示)'}\n时间：${nowIso}`,
         url: pageUrl,
         tag: `test-${Date.now()}`
       },
@@ -467,7 +467,7 @@ async function main() {
             const dynAlert = buildDynamicsAlert({
               events: uniqueNewEvents,
               watchlist,
-              notifyAllDynamics: settings.notifyAllDynamics !== false,
+              notifyAllDynamics: settings.notifyAllDynamics === true,
               pageUrl
             });
             if (dynAlert) {

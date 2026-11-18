@@ -26,7 +26,7 @@ const appState = {
     watchlist: [],
     subscriptions: [],
     webhooks: {},
-    settings: { rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: true, paused: false },
+    settings: { rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: false, paused: false },
     alerts: []
   },
   config: loadConfig(),
@@ -434,7 +434,7 @@ async function loadPrivateGist() {
     watchlist: safeParse('watchlist.json', []),
     subscriptions: safeParse('subscriptions.json', []),
     webhooks: safeParse('webhooks.json', {}),
-    settings: { rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: true, paused: false, ...safeParse('settings.json', {}) },
+    settings: { rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: false, paused: false, ...safeParse('settings.json', {}) },
     alerts: safeParse('alerts.json', [])
   };
   return appState.privateState;
@@ -461,7 +461,7 @@ async function createPrivateGistWithToken(token) {
     'watchlist.json': { content: '[]' },
     'subscriptions.json': { content: '[]' },
     'webhooks.json': { content: '{}' },
-    'settings.json': { content: JSON.stringify({ rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', paused: false }, null, 2) },
+    'settings.json': { content: JSON.stringify({ rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, maoyanCookie: '', notifyAllDynamics: false, paused: false }, null, 2) },
     'seen.json': { content: '{}' },
     'runtime.json': { content: '{}' },
     'alerts.json': { content: '[]' }
@@ -1582,10 +1582,10 @@ function renderSettingsTab(root) {
         </div>
       </div>
       <div class="field">
-        <label>新电影动态推送（定档 / 开票 / 改档 / 开分）</label>
+        <label>动态与开票推送范围（非星标新片始终记录在「动态」板块展示）</label>
         <select id="settingNotifyDynamics" class="select">
-          <option value="true" ${st.notifyAllDynamics !== false ? 'selected' : ''}>全部新电影都推送动态（同时包含星标电影的每轮开票）</option>
-          <option value="false" ${st.notifyAllDynamics === false ? 'selected' : ''}>仅推送我星标电影的动态与开票</option>
+          <option value="false" ${st.notifyAllDynamics !== true ? 'selected' : ''}>仅推送我星标的电影（定档/开票/改档/开分+每轮放票，默认）</option>
+          <option value="true" ${st.notifyAllDynamics === true ? 'selected' : ''}>全部新电影动态都推送（含未星标电影）</option>
         </select>
       </div>
       <div class="field">
