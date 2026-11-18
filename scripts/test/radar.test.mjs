@@ -9,7 +9,7 @@ import {
 } from '../lib/radar.mjs';
 import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
-import { parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
+import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
 import { buildMtopSign, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
 import { selectMoviesForIntelEnrichment } from '../monitor.mjs';
@@ -510,10 +510,10 @@ test('selectMoviesForIntelEnrichment refreshes starred/onInfo/near-release movie
       { id: 4, nm: '明年远期片', source: 'coming', rt: '2027-05-01', wish: 80000 }
     ],
     intelMap: {
-      '1': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'A', checkedAt: checked5MinAgo },
-      '2': { doubanScore: null, imdbScore: null, rtCriticsScore: 75, enm: 'B', checkedAt: checked5MinAgo },
-      '3': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'C', checkedAt: checked1MinAgo },
-      '4': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'D', checkedAt: checked5MinAgo }
+      '1': { matchVersion: INTEL_MATCH_VERSION, doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'A', checkedAt: checked5MinAgo },
+      '2': { matchVersion: INTEL_MATCH_VERSION, doubanScore: null, imdbScore: null, rtCriticsScore: 75, enm: 'B', checkedAt: checked5MinAgo },
+      '3': { matchVersion: INTEL_MATCH_VERSION, doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'C', checkedAt: checked1MinAgo },
+      '4': { matchVersion: INTEL_MATCH_VERSION, doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'D', checkedAt: checked5MinAgo }
     },
     activeWatchItems: [],
     nowIso,
@@ -523,4 +523,61 @@ test('selectMoviesForIntelEnrichment refreshes starred/onInfo/near-release movie
 
   const ids = selected.map((m) => m.id);
   assert.deepEqual(ids, [1, 2]);
+});
+
+test('v2 bilingual matcher rejects deep_water_2026, single-char V collisions, wrong-year films, and prioritizes Chinese+English IMDb hits', async () => {
+  // 1. Year-only match must never pass when titles do not match (e.g. Deep Quiet Room vs Deep Water 2026)
+  assert.ok(scoreTitleCandidate({ candTitle: 'Deep Water', candYear: 2026 }, { enm: 'Deep Quiet Room', year: 2026 }) < 0);
+  // 2. Short Latin "V" must never match "Five Nights at Freddy's 2"
+  assert.ok(scoreTitleCandidate({ candTitle: "Five Nights at Freddy's 2", candYear: 2026 }, { enm: 'V', year: 2026 }) < 0);
+  // 3. Re-released/sequel mismatch: "Dune" must not match "Dune: Part Three"
+  assert.ok(scoreTitleCandidate({ candTitle: 'Dune: Part Three', candYear: 2026 }, { enm: 'Dune', year: 2026 }) < 0);
+  // 4. Wrong-decade homonym must be rejected ("You Are My Sunshine" 2005 vs 2026 Chinese film)
+  assert.ok(scoreTitleCandidate({ candTitle: 'You Are My Sunshine', candYear: 2005 }, { enm: 'You are my sunshine', year: 2026 }) < 0);
+
+  // 5. Dual Chinese+English IMDb query picks tt39276601 (Chinese film Crossing) over foreign crossings
+  const mockFetchImdb = async (url) => {
+    const u = decodeURIComponent(String(url));
+    if (u.includes('四渡')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt39276601', l: 'Crossing', y: 2026, qid: 'movie', s: 'Ye Liu, Lei Wang' }] }), { status: 200 });
+    }
+    if (u.includes('CROSSING')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt27417166', l: 'Crossing', y: 2024, qid: 'movie', s: 'Mzia Arabuli' }] }), { status: 200 });
+    }
+    if (u.includes('agregarr')) {
+      return new Response(JSON.stringify([{ rating: 0, votes: 0 }]), { status: 200 });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  const imRes = await fetchImdbIntel({
+    title: '四渡',
+    enm: 'CROSSING',
+    year: 2026,
+    dir: '徐展雄',
+    fetchImpl: mockFetchImdb
+  });
+  assert.equal(imRes.imdbId, 'tt39276601');
+
+  // 6. RT rejects deep_water_2026 for Deep Quiet Room and rejects crossing_2024 without Chinese cast overlap
+  const rtResFake = await fetchRottenTomatoesIntel({
+    enm: 'Deep Quiet Room',
+    title: '深度安静',
+    year: 2026,
+    dir: '沈可尚',
+    fetchImpl: async () =>
+      new Response('<search-page-media-row release-year="2026" tomatometer-score="69"><a href="https://www.rottentomatoes.com/m/deep_water_2026" slot="title">Deep Water</a></search-page-media-row>', { status: 200 })
+  });
+  assert.equal(rtResFake, null);
+
+  const rtResSingle = await fetchRottenTomatoesIntel({
+    enm: 'CROSSING',
+    title: '四渡',
+    year: 2026,
+    dir: '徐展雄',
+    imdbActors: 'Ye Liu, Lei Wang',
+    fetchImpl: async () =>
+      new Response('<search-page-media-row release-year="2024" tomatometer-score="97"><a href="https://www.rottentomatoes.com/m/crossing_2024" slot="title">Crossing</a></search-page-media-row>', { status: 200 })
+  });
+  assert.equal(rtResSingle, null);
 });

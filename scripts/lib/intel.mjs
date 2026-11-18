@@ -1,15 +1,20 @@
 /**
- * Multi-platform score & metadata enrichment:
- * - Maoyan detailmovie (`enm`, `sc`, `snum`, `cat`, `dur`, `pubDesc`)
+ * Multi-platform score & metadata enrichment with strict bilingual (中英) + year + director/cast verification:
+ * - Maoyan detailmovie (`enm`, `sc`, `snum`, `cat`, `dur`, `dir`, `pubDesc`)
  * - Douban (`movie.douban.com/j/subject_suggest` + `m.douban.com/rexxar/api/v2/movie/<id>`)
- * - IMDb (`v2.sg.media-imdb.com/suggestion` + `api.agregarr.org/api/ratings`, optional OMDb)
- * - Rotten Tomatoes (`www.rottentomatoes.com/search` + detail page Popcornmeter)
+ * - IMDb (`v2/v3.sg.media-imdb.com/suggestion` with BOTH Chinese & English queries + `api.agregarr.org`, optional OMDb)
+ * - Rotten Tomatoes (`www.rottentomatoes.com/search` + detail page with strict title/year/cast guard)
  */
 
 import { fetchMaoyanMovieDetail, jitterDelay, sleep } from './maoyan.mjs';
 
+export const INTEL_MATCH_VERSION = 2;
+
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+const SEQUEL_TOKENS = new Set(['2', '3', '4', '5', '6', 'ii', 'iii', 'iv', 'v', 'two', 'three', 'four']);
+const STOP_TOKENS = new Set(['the', 'a', 'an', 'of', 'and', 'or', 'in', 'on', 'at', 'to', 'for']);
 
 export function extractYear(dateStr = '') {
   const m = String(dateStr || '').match(/(\d{4})/);
@@ -22,25 +27,131 @@ export function normalizeTitle(s = '') {
     .replace(/[\s:：·\-—_'’"“”()（）.,!?！？]+/g, '');
 }
 
-export function scoreTitleCandidate({ candTitle = '', candSubTitle = '', candYear = null }, { title = '', enm = '', year = null }) {
-  let score = 0;
-  const nTitle = normalizeTitle(title);
-  const nEnm = normalizeTitle(enm);
-  const nCand = normalizeTitle(candTitle);
-  const nSub = normalizeTitle(candSubTitle);
+function stripYearSuffix(s = '') {
+  return String(s || '').replace(/\s*[\(（]\d{4}[\)）]\s*$/g, '').trim();
+}
 
-  if (nTitle && nCand === nTitle) score += 80;
-  else if (nTitle && (nCand.includes(nTitle) || nTitle.includes(nCand))) score += 28;
+function stripLeadingArticles(s = '') {
+  return String(s || '').replace(/^(the|a|an)\s+/i, '').trim();
+}
 
-  if (nEnm && (nCand === nEnm || nSub === nEnm)) score += 80;
-  else if (nEnm && (nCand.includes(nEnm) || nSub.includes(nEnm))) score += 28;
+export function tokenizeLatin(s = '') {
+  return stripYearSuffix(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 1);
+}
 
-  if (year && candYear) {
-    const diff = Math.abs(Number(year) - Number(candYear));
-    if (diff === 0) score += 35;
-    else if (diff === 1) score += 20;
-    else if (diff >= 3) score -= 25;
+function hasLatinLetters(s = '') {
+  return /[a-zA-Z]/.test(String(s || ''));
+}
+
+function normalizePersonNames(raw = '') {
+  return String(raw || '')
+    .split(/[,，/、]+/)
+    .map((x) => normalizeTitle(x))
+    .filter((x) => x.length >= 2);
+}
+
+/**
+ * Computes strict title similarity (0..100). Returns 0 when two titles do not genuinely match.
+ */
+export function scoreStrictTitleMatch(candRaw = '', targetRaw = '') {
+  const cClean = stripYearSuffix(candRaw);
+  const tClean = stripYearSuffix(targetRaw);
+  const nC = normalizeTitle(cClean);
+  const nT = normalizeTitle(tClean);
+  if (!nC || !nT) return 0;
+
+  if (nC === nT) return 100;
+
+  const aC = normalizeTitle(stripLeadingArticles(cClean));
+  const aT = normalizeTitle(stripLeadingArticles(tClean));
+  if (aC && aT && aC === aT) return 96;
+
+  // Reject single- or two-character Latin titles like "V" unless exact match above succeeded
+  if (hasLatinLetters(tClean) && !/[\u4e00-\u9fff]/.test(tClean) && nT.length <= 2) {
+    return 0;
   }
+
+  const cTokens = tokenizeLatin(cClean);
+  const tTokens = tokenizeLatin(tClean);
+  if (cTokens.length > 0 && tTokens.length > 0) {
+    // Prevent "Dune" matching "Dune: Part Three" when sequel markers differ
+    const cSeq = cTokens.filter((t) => SEQUEL_TOKENS.has(t)).join(',');
+    const tSeq = tTokens.filter((t) => SEQUEL_TOKENS.has(t)).join(',');
+    if (cSeq !== tSeq) return 0;
+
+    const cCore = cTokens.filter((t) => !STOP_TOKENS.has(t));
+    const tCore = tTokens.filter((t) => !STOP_TOKENS.has(t));
+    if (cCore.length >= 2 && tCore.length >= 2) {
+      const cSet = new Set(cCore);
+      const tSet = new Set(tCore);
+      let inter = 0;
+      for (const w of cSet) {
+        if (tSet.has(w)) inter++;
+      }
+      const union = new Set([...cSet, ...tSet]).size;
+      const jaccard = union > 0 ? inter / union : 0;
+      if (inter >= 2 && jaccard >= 0.8) return 78;
+      if (inter >= 2 && jaccard >= 0.65 && (aC.startsWith(aT) || aT.startsWith(aC))) return 64;
+    }
+    return 0;
+  }
+
+  // CJK partial check (only for re-release tags etc. on >= 4-char CJK titles without sequel digits)
+  if (/[\u4e00-\u9fff]/.test(tClean) && /[\u4e00-\u9fff]/.test(cClean)) {
+    const minLen = Math.min(nC.length, nT.length);
+    const maxLen = Math.max(nC.length, nT.length);
+    if (minLen >= 4 && minLen / maxLen >= 0.65 && (nC.includes(nT) || nT.includes(nC))) {
+      return 68;
+    }
+  }
+
+  return 0;
+}
+
+export function scoreTitleCandidate(
+  { candTitle = '', candSubTitle = '', candYear = null, candDirectors = [] },
+  { title = '', enm = '', akaList = [], year = null, allowedYears = [], directors = [] }
+) {
+  const candStrings = [candTitle, candSubTitle].filter(Boolean);
+  const targetStrings = Array.from(new Set([title, enm, ...akaList].filter(Boolean)));
+
+  let titleScore = 0;
+  for (const cs of candStrings) {
+    for (const ts of targetStrings) {
+      titleScore = Math.max(titleScore, scoreStrictTitleMatch(cs, ts));
+    }
+  }
+
+  // Never allow year/director bonuses to create a match when titles do not match
+  if (titleScore === 0) {
+    return -999;
+  }
+
+  let score = titleScore;
+  const yearsToCheck = Array.from(
+    new Set([year, ...allowedYears].map((y) => Number(y)).filter((y) => y >= 1900 && y <= 2100))
+  );
+
+  if (candYear && yearsToCheck.length > 0) {
+    const minDiff = Math.min(...yearsToCheck.map((y) => Math.abs(Number(candYear) - y)));
+    if (minDiff === 0) score += 40;
+    else if (minDiff === 1) score += 25;
+    else if (minDiff === 2) score -= 10;
+    else score -= 200; // Hard reject wrong-era movies
+  } else if (!candYear && yearsToCheck.length > 0 && tokenizeLatin(enm || title).length <= 1) {
+    score -= 100;
+  }
+
+  if (directors.length > 0 && candDirectors.length > 0) {
+    const cDirs = new Set(candDirectors.map((d) => normalizeTitle(d)).filter((x) => x.length >= 2));
+    const hasDirOverlap = directors.some((d) => cDirs.has(d));
+    score += hasDirOverlap ? 60 : -120;
+  }
+
   return score;
 }
 
@@ -58,11 +169,33 @@ async function fetchJsonSafe(url, headers = {}, timeoutMs = 8000, fetchImpl = fe
   return JSON.parse(text);
 }
 
-export async function fetchDoubanIntel({ title, enm = '', year = null, knownId = '', fetchImpl = fetch }) {
-  let doubanId = knownId || '';
-  let subTitleFromDouban = '';
+async function queryImdbSuggestion(query, fetchImpl = fetch) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const first = q[0].toLowerCase().replace(/[^a-z0-9]/g, 'x') || 'x';
+  for (const host of ['v2.sg.media-imdb.com', 'v3.sg.media-imdb.com']) {
+    try {
+      const sug = await fetchJsonSafe(
+        `https://${host}/suggestion/${first}/${encodeURIComponent(q)}.json`,
+        {},
+        8000,
+        fetchImpl
+      );
+      if (Array.isArray(sug?.d)) return sug.d;
+    } catch {
+      // try next IMDb suggestion host
+    }
+  }
+  return [];
+}
 
-  if (!doubanId && title) {
+export async function fetchDoubanIntel({ title, enm = '', year = null, dir = '', knownId = '', fetchImpl = fetch }) {
+  const directors = normalizePersonNames(dir);
+  const candidateIds = [];
+
+  if (knownId) {
+    candidateIds.push({ id: String(knownId), subTitle: '' });
+  } else if (title) {
     const list = await fetchJsonSafe(
       `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(title)}`,
       { Referer: 'https://movie.douban.com/' },
@@ -70,81 +203,175 @@ export async function fetchDoubanIntel({ title, enm = '', year = null, knownId =
       fetchImpl
     );
     const moviesOnly = (Array.isArray(list) ? list : []).filter((item) => item.type === 'movie');
-    let best = null;
-    let bestScore = -999;
-    for (const c of moviesOnly) {
-      const s = scoreTitleCandidate(
-        { candTitle: c.title, candSubTitle: c.sub_title, candYear: extractYear(c.year) },
-        { title, enm, year }
-      );
-      if (s > bestScore) {
-        bestScore = s;
-        best = c;
-      }
-    }
-    if (best && bestScore >= 25) {
-      doubanId = String(best.id);
-      subTitleFromDouban = best.sub_title || '';
+    const scored = moviesOnly
+      .map((c) => {
+        const zhScore = scoreStrictTitleMatch(c.title, title);
+        const enScore = enm ? Math.max(scoreStrictTitleMatch(c.sub_title, enm), scoreStrictTitleMatch(c.title, enm)) : 0;
+        const bothZhEnMatch = zhScore >= 96 && enScore >= 96;
+        let s = scoreTitleCandidate(
+          { candTitle: c.title, candSubTitle: c.sub_title, candYear: extractYear(c.year) },
+          { title, enm, year }
+        );
+        if (bothZhEnMatch && s < 0) {
+          s = 90;
+        }
+        return {
+          id: String(c.id),
+          subTitle: c.sub_title || '',
+          score: s + (bothZhEnMatch ? 60 : 0)
+        };
+      })
+      .filter((c) => c.score >= 85)
+      .sort((a, b) => b.score - a.score);
+
+    for (const c of scored.slice(0, 3)) {
+      candidateIds.push({ id: c.id, subTitle: c.subTitle });
     }
   }
 
-  if (!doubanId) return null;
+  for (const cand of candidateIds) {
+    const detail = await fetchJsonSafe(
+      `https://m.douban.com/rexxar/api/v2/movie/${encodeURIComponent(cand.id)}`,
+      { Referer: `https://m.douban.com/movie/subject/${cand.id}/` },
+      8000,
+      fetchImpl
+    );
 
-  const detail = await fetchJsonSafe(
-    `https://m.douban.com/rexxar/api/v2/movie/${encodeURIComponent(doubanId)}`,
-    { Referer: `https://m.douban.com/movie/subject/${doubanId}/` },
-    8000,
-    fetchImpl
-  );
+    const detailDirs = (detail?.directors || []).map((d) => d?.name || '').filter(Boolean);
+    const doubanYear = extractYear(detail?.year);
+    const allDbTitles = [detail?.title, detail?.original_title, ...(detail?.aka || []), cand.subTitle].filter(Boolean);
 
-  const val = Number(detail?.rating?.value || 0);
-  const count = Number(detail?.rating?.count || 0);
+    // Reject obvious director collision when both Maoyan and Douban specify directors
+    if (!knownId && directors.length > 0 && detailDirs.length > 0) {
+      const cDirs = new Set(detailDirs.map((d) => normalizeTitle(d)).filter((x) => x.length >= 2));
+      const overlap = directors.some((d) => cDirs.has(d));
+      if (!overlap) {
+        continue;
+      }
+    }
 
-  return {
-    doubanId,
-    doubanUrl: `https://movie.douban.com/subject/${doubanId}/`,
-    doubanScore: val > 0 ? val : null,
-    doubanVotes: count > 0 ? count : 0,
-    enmFromDouban: subTitleFromDouban
-  };
+    const val = Number(detail?.rating?.value || 0);
+    const count = Number(detail?.rating?.count || 0);
+    const origLatin = hasLatinLetters(detail?.original_title || '') ? detail.original_title : '';
+    const akaLatin = (detail?.aka || []).find((a) => hasLatinLetters(a)) || '';
+
+    return {
+      doubanId: cand.id,
+      doubanUrl: `https://movie.douban.com/subject/${cand.id}/`,
+      doubanScore: val > 0 ? val : null,
+      doubanVotes: count > 0 ? count : 0,
+      doubanYear,
+      doubanOrigTitle: detail?.original_title || '',
+      doubanAka: detail?.aka || [],
+      doubanTitles: allDbTitles,
+      enmFromDouban: origLatin || akaLatin || cand.subTitle || ''
+    };
+  }
+
+  return null;
 }
 
-export async function fetchImdbIntel({ enm = '', title = '', year = null, knownId = '', omdbApiKey = '', fetchImpl = fetch }) {
+export async function fetchImdbIntel({
+  enm = '',
+  title = '',
+  akaList = [],
+  year = null,
+  allowedYears = [],
+  dir = '',
+  knownId = '',
+  omdbApiKey = '',
+  fetchImpl = fetch
+}) {
   let imdbId = knownId || '';
+  let imdbTitle = '';
+  let imdbYear = null;
+  let imdbActors = '';
+  let matchedByZhEn = false;
 
   if (!imdbId) {
-    const query = ((/[a-zA-Z]/.test(enm) ? enm : '') || title || '').trim();
-    if (!query) return null;
-    const first = query[0].toLowerCase().replace(/[^a-z0-9]/g, 'x') || 'x';
-    let sug = null;
-    for (const host of ['v2.sg.media-imdb.com', 'v3.sg.media-imdb.com']) {
-      try {
-        sug = await fetchJsonSafe(
-          `https://${host}/suggestion/${first}/${encodeURIComponent(query)}.json`,
-          {},
-          8000,
-          fetchImpl
-        );
-        if (sug?.d) break;
-      } catch {
-        // try next IMDb suggestion host
-      }
+    const zhQuery = /[\u4e00-\u9fff]/.test(String(title || '')) ? String(title).trim() : '';
+    const enCand = [enm, ...akaList].find((t) => hasLatinLetters(t) && normalizeTitle(t).length >= 2) || '';
+    const enQuery = enCand && normalizeTitle(enCand) !== normalizeTitle(zhQuery) ? enCand.trim() : '';
+
+    const [zhList, enList] = await Promise.all([
+      zhQuery ? queryImdbSuggestion(zhQuery, fetchImpl) : Promise.resolve([]),
+      enQuery ? queryImdbSuggestion(enQuery, fetchImpl) : Promise.resolve([])
+    ]);
+
+    const zhMovies = zhList.filter((x) => x.id?.startsWith('tt') && (!x.qid || x.qid === 'movie' || x.qid === 'tvSpecial'));
+    const enMovies = enList.filter((x) => x.id?.startsWith('tt') && (!x.qid || x.qid === 'movie' || x.qid === 'tvSpecial'));
+
+    const zhIds = new Set(zhMovies.map((x) => x.id));
+    const enIds = new Set(enMovies.map((x) => x.id));
+    const mergedById = new Map();
+    for (const c of [...zhMovies, ...enMovies]) {
+      if (!mergedById.has(c.id)) mergedById.set(c.id, c);
     }
-    const candidates = (sug?.d || []).filter((x) => x.id?.startsWith('tt') && (!x.qid || x.qid === 'movie'));
+
+    const yearsPool = Array.from(
+      new Set([year, ...allowedYears].map((y) => Number(y)).filter((y) => y >= 1900 && y <= 2100))
+    );
+    const hasChineseDir = /[\u4e00-\u9fff]/.test(String(dir || ''));
+    const isSingleWordEn = enQuery ? tokenizeLatin(enQuery).length <= 1 : true;
+
     let best = null;
     let bestScore = -999;
-    for (const c of candidates) {
-      const s = scoreTitleCandidate(
-        { candTitle: c.l, candYear: c.y },
-        { title, enm: query, year }
+
+    for (const c of mergedById.values()) {
+      const hitZh = zhIds.has(c.id);
+      const hitEn = enIds.has(c.id);
+      const candYear = c.y ? Number(c.y) : null;
+      const isMultiWordExactMatch = tokenizeLatin(enQuery || enm).length >= 2 && scoreStrictTitleMatch(c.l, enQuery || enm) >= 96;
+      const allowDelayedBilingual = hitZh && hitEn && isMultiWordExactMatch;
+
+      // Reject hard year mismatches (>= 3 years off) unless dual Chinese+English multi-word hit confirms delayed release
+      if (candYear && yearsPool.length > 0 && !allowDelayedBilingual) {
+        const minDiff = Math.min(...yearsPool.map((y) => Math.abs(candYear - y)));
+        if (minDiff >= 3) continue;
+      }
+
+      let base = scoreTitleCandidate(
+        { candTitle: c.l, candYear },
+        { title, enm: enQuery || enm, akaList, year, allowedYears }
       );
-      if (s > bestScore) {
-        bestScore = s;
-        best = c;
+      if (allowDelayedBilingual && base < 0) {
+        base = 96;
+      }
+
+      // Even if Maoyan enm differs slightly (translated English title), exact Chinese query hit on IMDb is strong proof
+      if (hitZh) {
+        if (base < 0) {
+          // Allow zh-only IMDb hit only if it is the top Chinese search hit and year is compatible
+          const zhRank = zhMovies.findIndex((z) => z.id === c.id);
+          base = zhRank === 0 ? 75 : zhRank === 1 ? 55 : -999;
+          if (candYear && yearsPool.length > 0) {
+            const minDiff = Math.min(...yearsPool.map((y) => Math.abs(candYear - y)));
+            base += minDiff === 0 ? 40 : minDiff === 1 ? 25 : -10;
+          }
+        }
+        base += hitEn ? 100 : 60;
+      } else {
+        // English-only hit: block ambiguous 1-word titles on Chinese films (e.g. "Reset", "Crossing", "V") unless exact zh hit
+        if (base < 95) continue;
+        if (isSingleWordEn && (hasChineseDir || yearsPool.length === 0)) continue;
+        if (isSingleWordEn && candYear && yearsPool.length > 0) {
+          const minDiff = Math.min(...yearsPool.map((y) => Math.abs(candYear - y)));
+          if (minDiff > 1) continue;
+        }
+      }
+
+      if (base > bestScore) {
+        bestScore = base;
+        best = { c, hitZh, hitEn };
       }
     }
-    if (best && bestScore >= 25) {
-      imdbId = best.id;
+
+    if (best && bestScore >= 95) {
+      imdbId = best.c.id;
+      imdbTitle = best.c.l || '';
+      imdbYear = best.c.y ? Number(best.c.y) : null;
+      imdbActors = best.c.s || '';
+      matchedByZhEn = Boolean(best.hitZh && best.hitEn);
     }
   }
 
@@ -168,6 +395,10 @@ export async function fetchImdbIntel({ enm = '', title = '', year = null, knownI
           imdbUrl: `https://www.imdb.com/title/${imdbId}/`,
           imdbScore: val,
           imdbVotes: Number.isNaN(votes) ? 0 : votes,
+          imdbTitle,
+          imdbYear,
+          imdbActors,
+          matchedByZhEn,
           rtFromOmdb: rtMatch ? Number(rtMatch[1]) : null
         };
       }
@@ -190,7 +421,11 @@ export async function fetchImdbIntel({ enm = '', title = '', year = null, knownI
     imdbId,
     imdbUrl: `https://www.imdb.com/title/${imdbId}/`,
     imdbScore: ratingVal > 0 ? ratingVal : null,
-    imdbVotes: votes > 0 ? votes : 0
+    imdbVotes: votes > 0 ? votes : 0,
+    imdbTitle,
+    imdbYear,
+    imdbActors,
+    matchedByZhEn
   };
 }
 
@@ -203,10 +438,12 @@ export function parseRottenTomatoesSearchRows(html = '') {
     const yearRaw = block.match(/release-year="([^"]*)"/)?.[1] || '';
     const href = block.match(/href="(https:\/\/www\.rottentomatoes\.com\/m\/[^"]+)"/)?.[1] || '';
     const title = block.match(/slot="title"[^>]*>([\s\S]*?)<\/a>/)?.[1]?.trim() || '';
+    const castAttr = block.match(/cast="([^"]*)"/)?.[1] || '';
     if (!href) continue;
     rows.push({
       title,
       year: yearRaw ? Number(yearRaw) : null,
+      cast: castAttr,
       criticsScore: scoreRaw !== '' && !Number.isNaN(Number(scoreRaw)) ? Number(scoreRaw) : null,
       url: href
     });
@@ -240,13 +477,46 @@ export function parseRottenTomatoesDetailJson(html = '') {
   return { criticsScore, audienceScore };
 }
 
-export async function fetchRottenTomatoesIntel({ enm = '', title = '', year = null, knownUrl = '', fetchImpl = fetch }) {
+function rtDetailMatchesActors(detailHtml = '', imdbActors = '') {
+  if (!imdbActors || !detailHtml) return false;
+  const lower = detailHtml.toLowerCase();
+  const names = String(imdbActors)
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length >= 4);
+  if (names.length === 0) return false;
+  return names.some((name) => lower.includes(name));
+}
+
+export async function fetchRottenTomatoesIntel({
+  enm = '',
+  title = '',
+  akaList = [],
+  year = null,
+  allowedYears = [],
+  dir = '',
+  imdbTitle = '',
+  imdbYear = null,
+  imdbActors = '',
+  knownUrl = '',
+  fetchImpl = fetch
+}) {
   let rtUrl = knownUrl || '';
   let criticsScore = null;
+  const hasChineseDir = /[\u4e00-\u9fff]/.test(String(dir || ''));
+  const yearsPool = Array.from(
+    new Set([year, imdbYear, ...allowedYears].map((y) => Number(y)).filter((y) => y >= 1900 && y <= 2100))
+  );
+
+  const latinCandidates = [imdbTitle, enm, ...akaList].filter(
+    (t) => hasLatinLetters(t) && normalizeTitle(t).length >= 3
+  );
+  const query = latinCandidates[0] || '';
 
   if (!rtUrl) {
-    const query = (enm || title || '').trim();
     if (!query) return null;
+    const isSingleWordQuery = tokenizeLatin(query).length <= 1;
+
     const html = await fetchTextSafe(
       `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`,
       {},
@@ -256,17 +526,25 @@ export async function fetchRottenTomatoesIntel({ enm = '', title = '', year = nu
     const rows = parseRottenTomatoesSearchRows(html);
     let best = null;
     let bestScore = -999;
+
     for (const r of rows) {
+      if (isSingleWordQuery) {
+        if (!r.year || (yearsPool.length > 0 && Math.min(...yearsPool.map((y) => Math.abs(r.year - y))) > 1)) {
+          continue;
+        }
+      }
       const s = scoreTitleCandidate(
         { candTitle: r.title, candYear: r.year },
-        { title, enm: query, year }
+        { title: '', enm: query, akaList: latinCandidates, year, allowedYears: yearsPool }
       );
       if (s > bestScore) {
         bestScore = s;
         best = r;
       }
     }
-    if (best && bestScore >= 25) {
+
+    // Require strict title + compatible year (score >= 95)
+    if (best && bestScore >= 95) {
       rtUrl = best.url;
       criticsScore = best.criticsScore;
     }
@@ -277,11 +555,19 @@ export async function fetchRottenTomatoesIntel({ enm = '', title = '', year = nu
   let audienceScore = null;
   try {
     const detailHtml = await fetchTextSafe(rtUrl, {}, 9000, fetchImpl);
+    const isSingleWordQuery = query ? tokenizeLatin(query).length <= 1 : false;
+    // For ambiguous single-word titles on Chinese films (e.g. "Crossing", "Reset"), require actor cross-check in RT detail page
+    if (isSingleWordQuery && hasChineseDir && imdbActors && !rtDetailMatchesActors(detailHtml, imdbActors)) {
+      return null;
+    }
     const parsed = parseRottenTomatoesDetailJson(detailHtml);
     if (parsed.criticsScore !== null) criticsScore = parsed.criticsScore;
     if (parsed.audienceScore !== null) audienceScore = parsed.audienceScore;
   } catch {
-    // Keep search score if detail page timed out
+    // Keep search score if detail page timed out, except ambiguous Chinese single-word titles
+    if (query && tokenizeLatin(query).length <= 1 && hasChineseDir) {
+      return null;
+    }
   }
 
   return {
@@ -293,37 +579,46 @@ export async function fetchRottenTomatoesIntel({ enm = '', title = '', year = nu
 
 /**
  * Enriches one movie with Maoyan detail (`enm`, `sc`, `cat`, `dur`, `pubDesc`) plus Douban, IMDb, and RT scores.
- * Each external call is isolated so one platform failing never breaks the others.
+ * Uses bilingual Chinese+English queries plus year & director/cast cross-checks to prevent false platform matches.
  */
 export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omdbApiKey = '', tppMatch = null, fetchImpl = fetch } = {}) {
-  const tppEnm = tppMatch?.showNameEn && /[a-zA-Z]/.test(tppMatch.showNameEn) ? tppMatch.showNameEn : '';
+  const isV2 = prevIntel?.matchVersion === INTEL_MATCH_VERSION;
+  const basePrev = isV2 ? prevIntel : {};
+  const tppEnm = tppMatch?.showNameEn && hasLatinLetters(tppMatch.showNameEn) ? tppMatch.showNameEn : '';
+
   const next = {
+    matchVersion: INTEL_MATCH_VERSION,
     movieId: Number(movie.id),
     enm: prevIntel.enm || tppEnm || '',
     cat: prevIntel.cat || '',
     dur: prevIntel.dur || 0,
     dir: prevIntel.dir || '',
+    origRt: basePrev.origRt || prevIntel.origRt || '',
     pubDesc: prevIntel.pubDesc || '',
     maoyanScore: Number(movie.sc || prevIntel.maoyanScore || 0) || null,
     maoyanVotes: prevIntel.maoyanVotes || 0,
-    doubanId: prevIntel.doubanId || '',
-    doubanUrl: prevIntel.doubanUrl || '',
-    doubanScore: prevIntel.doubanScore ?? null,
-    doubanVotes: prevIntel.doubanVotes || 0,
-    imdbId: prevIntel.imdbId || '',
-    imdbUrl: prevIntel.imdbUrl || '',
-    imdbScore: prevIntel.imdbScore ?? null,
-    imdbVotes: prevIntel.imdbVotes || 0,
-    rtUrl: prevIntel.rtUrl || '',
-    rtCriticsScore: prevIntel.rtCriticsScore ?? null,
-    rtAudienceScore: prevIntel.rtAudienceScore ?? null,
+    doubanId: basePrev.doubanId || '',
+    doubanUrl: basePrev.doubanUrl || '',
+    doubanScore: basePrev.doubanScore ?? null,
+    doubanVotes: basePrev.doubanVotes || 0,
+    doubanYear: basePrev.doubanYear ?? null,
+    imdbId: basePrev.imdbId || '',
+    imdbUrl: basePrev.imdbUrl || '',
+    imdbScore: basePrev.imdbScore ?? null,
+    imdbVotes: basePrev.imdbVotes || 0,
+    imdbTitle: basePrev.imdbTitle || '',
+    imdbYear: basePrev.imdbYear ?? null,
+    imdbActors: basePrev.imdbActors || '',
+    rtUrl: basePrev.rtUrl || '',
+    rtCriticsScore: basePrev.rtCriticsScore ?? null,
+    rtAudienceScore: basePrev.rtAudienceScore ?? null,
     tppId: tppMatch?.tppId || prevIntel.tppId || null,
     tppWish: tppMatch?.tppWish ?? prevIntel.tppWish ?? null,
     tppScore: tppMatch?.tppScore ?? prevIntel.tppScore ?? null,
     checkedAt: new Date().toISOString()
   };
 
-  if (!next.pubDesc) {
+  if (!next.pubDesc || !next.origRt) {
     try {
       const dm = await fetchMaoyanMovieDetail(movie.id, { cookie, fetchImpl });
       if (dm.ok && dm.data) {
@@ -331,6 +626,7 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
         next.cat = dm.data.cat || next.cat;
         next.dur = dm.data.dur || next.dur;
         next.dir = dm.data.dir || next.dir;
+        next.origRt = dm.data.rt || next.origRt;
         next.pubDesc = dm.data.pubDesc || next.pubDesc;
         if (dm.data.sc > 0) next.maoyanScore = dm.data.sc;
         if (dm.data.snum > 0) next.maoyanVotes = dm.data.snum;
@@ -340,16 +636,18 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     }
   }
 
-  const year = extractYear(movie.rt || next.pubDesc);
+  const maoyanYear = extractYear(next.origRt || movie.rt || next.pubDesc);
+  const akaList = [];
 
-  // Douban
-  if (!next.doubanScore || !next.doubanId) {
+  // Douban (matched by Chinese + English + director/year)
+  if (!next.doubanScore || !next.doubanId || !next.doubanYear) {
     try {
       await sleep(jitterDelay(250, 500));
       const db = await fetchDoubanIntel({
         title: movie.nm,
         enm: next.enm,
-        year,
+        year: maoyanYear,
+        dir: next.dir,
         knownId: next.doubanId,
         fetchImpl
       });
@@ -358,21 +656,40 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
         next.doubanUrl = db.doubanUrl;
         if (db.doubanScore !== null) next.doubanScore = db.doubanScore;
         if (db.doubanVotes > 0) next.doubanVotes = db.doubanVotes;
-        if (!next.enm && db.enmFromDouban) next.enm = db.enmFromDouban;
+        if (db.doubanYear) next.doubanYear = db.doubanYear;
+        if (!hasLatinLetters(next.enm) && db.enmFromDouban) next.enm = db.enmFromDouban;
+        for (const t of [db.doubanOrigTitle, ...(db.doubanAka || [])]) {
+          if (t && hasLatinLetters(t)) akaList.push(t);
+        }
       }
     } catch {
       // Keep previous Douban state
     }
   }
 
-  // IMDb
+  // Prefer Douban's true production year when Maoyan shows a later re-release date (e.g. Dune 2021 re-released in 2026)
+  const isRerelease = /重映|4k|imax/i.test(movie.nm || '');
+  const primaryYear =
+    next.doubanYear && maoyanYear && Math.abs(next.doubanYear - maoyanYear) >= 3 && (isRerelease || maoyanYear >= 2025)
+      ? next.doubanYear
+      : (maoyanYear || next.doubanYear);
+  const allowedYears = Array.from(new Set([primaryYear, next.doubanYear, maoyanYear].filter(Boolean)));
+  if (primaryYear === next.doubanYear && maoyanYear && Math.abs(next.doubanYear - maoyanYear) >= 3 && isRerelease) {
+    // Exclude re-release year for classics explicitly labeled as re-releases
+    allowedYears.splice(0, allowedYears.length, next.doubanYear);
+  }
+
+  // IMDb (simultaneous Chinese + English lookup with strict year & bilingual cross-verification)
   if (!next.imdbScore || !next.imdbId) {
     try {
       await sleep(jitterDelay(200, 450));
       const im = await fetchImdbIntel({
         enm: next.enm,
         title: movie.nm,
-        year,
+        akaList,
+        year: primaryYear,
+        allowedYears,
+        dir: next.dir,
         knownId: next.imdbId,
         omdbApiKey,
         fetchImpl
@@ -382,6 +699,9 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
         next.imdbUrl = im.imdbUrl;
         if (im.imdbScore !== null) next.imdbScore = im.imdbScore;
         if (im.imdbVotes > 0) next.imdbVotes = im.imdbVotes;
+        if (im.imdbTitle) next.imdbTitle = im.imdbTitle;
+        if (im.imdbYear) next.imdbYear = im.imdbYear;
+        if (im.imdbActors) next.imdbActors = im.imdbActors;
         if (next.rtCriticsScore === null && im.rtFromOmdb !== undefined && im.rtFromOmdb !== null) {
           next.rtCriticsScore = im.rtFromOmdb;
         }
@@ -391,14 +711,20 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     }
   }
 
-  // Rotten Tomatoes
+  // Rotten Tomatoes (strict title + year + actor verification)
   if (next.rtCriticsScore === null || !next.rtUrl) {
     try {
       await sleep(jitterDelay(250, 550));
       const rt = await fetchRottenTomatoesIntel({
         enm: next.enm,
         title: movie.nm,
-        year,
+        akaList,
+        year: primaryYear,
+        allowedYears,
+        dir: next.dir,
+        imdbTitle: next.imdbTitle,
+        imdbYear: next.imdbYear,
+        imdbActors: next.imdbActors,
         knownUrl: next.rtUrl,
         fetchImpl
       });

@@ -14,7 +14,7 @@ import { CINEMAS, getBeijingDateStr, shiftDateStr } from './lib/config.mjs';
 import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
 import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
-import { enrichMovieIntel } from './lib/intel.mjs';
+import { INTEL_MATCH_VERSION, enrichMovieIntel } from './lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from './lib/dynamics.mjs';
 import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
 import { dispatchAlerts } from './lib/notifier.mjs';
@@ -75,6 +75,7 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
 
   for (const m of catalogMovies) {
     const prev = intelMap[String(m.id)];
+    const needsV2Upgrade = !prev || prev.matchVersion !== INTEL_MATCH_VERSION;
     const ageMin = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) : Infinity;
     const isStarred = starredIds.has(Number(m.id));
     const rt = String(m.rt || '').trim();
@@ -87,21 +88,21 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
     );
     const isHotOrSoon = isStarred || m.source === 'onInfo' || isNearRelease;
     const missingAnyScore =
-      !prev ||
+      needsV2Upgrade ||
       prev.doubanScore === null ||
       prev.imdbScore === null ||
       prev.rtCriticsScore === null ||
       !prev.enm;
 
     const eligible =
-      !prev ||
+      needsV2Upgrade ||
       (isHotOrSoon && ((missingAnyScore && ageMin >= 4.5) || ageMin >= 60)) ||
       (!isHotOrSoon && ((missingAnyScore && ageMin >= 240) || ageMin >= 1440));
 
     if (eligible) {
       const priorityScore =
         (isStarred ? 1_000_000 : 0) +
-        (!prev ? 200_000 : 0) +
+        (needsV2Upgrade ? 200_000 : 0) +
         (isNearRelease ? 80_000 : 0) +
         (m.source === 'onInfo' ? 50_000 : 0) +
         (missingAnyScore ? 20_000 : 0) +
@@ -361,14 +362,37 @@ async function main() {
       const enrichedComing = attachWishGrowth(cat.coming, nextWishSnapshots);
       const allEnriched = [...enrichedOnInfo, ...enrichedComing];
 
-      // Prune intel cache to active catalog + starred movies so state.json stays compact
+      // Prune intel cache to active catalog + starred movies & scrub legacy unverified v1 scores
+      const hadLegacyV1Intel = Object.values(nextIntelMap).some(
+        (v) => v && v.matchVersion !== INTEL_MATCH_VERSION && (v.imdbUrl || v.rtUrl || v.doubanId)
+      );
+      if (hadLegacyV1Intel) {
+        nextDynamics = nextDynamics.filter((d) => d.type !== 'scored');
+      }
       const keepIds = new Set([
         ...allEnriched.map((m) => String(m.id)),
         ...activeWatchItems.map((w) => String(w.movieId)).filter(Boolean)
       ]);
       const prunedIntel = {};
       for (const [k, v] of Object.entries(nextIntelMap)) {
-        if (keepIds.has(k)) prunedIntel[k] = v;
+        if (!keepIds.has(k) || !v) continue;
+        if (v.matchVersion === INTEL_MATCH_VERSION) {
+          prunedIntel[k] = v;
+        } else {
+          prunedIntel[k] = {
+            movieId: v.movieId || Number(k),
+            enm: v.enm || '',
+            cat: v.cat || '',
+            dur: v.dur || 0,
+            dir: v.dir || '',
+            pubDesc: v.pubDesc || '',
+            maoyanScore: v.maoyanScore ?? null,
+            maoyanVotes: v.maoyanVotes || 0,
+            tppId: v.tppId ?? null,
+            tppWish: v.tppWish ?? null,
+            tppScore: v.tppScore ?? null
+          };
+        }
       }
       nextIntelMap = prunedIntel;
 
@@ -402,7 +426,7 @@ async function main() {
       }
 
       // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within 5-min cadence
-      const budget = mode === 'refresh_catalog' ? 20 : 16;
+      const budget = mode === 'refresh_catalog' ? 28 : 20;
       const toEnrich = selectMoviesForIntelEnrichment({
         catalogMovies: allEnriched,
         intelMap: nextIntelMap,
