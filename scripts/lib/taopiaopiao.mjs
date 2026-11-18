@@ -183,15 +183,21 @@ export async function fetchTaopiaopiaoCatalog({ fetchImpl = null } = {}) {
     return [];
   });
 
-  const soon = await callTaopiaopiaoMtop(
-    'mtop.film.mtopshowapi.getsoonshowsbycitycode',
-    '5.0',
-    { citycode: TPP_CITY_CODE, platform: '8', pageIndex: 1, pageSize: 100 },
-    { cookieState, fetchImpl }
-  ).catch((err) => {
-    console.warn('Taopiaopiao soon fetch failed:', err?.message || err);
-    return [];
-  });
+  const soon = [];
+  for (let pageIndex = 1; pageIndex <= 3; pageIndex++) {
+    const page = await callTaopiaopiaoMtop(
+      'mtop.film.mtopshowapi.getsoonshowsbycitycode',
+      '5.0',
+      { citycode: TPP_CITY_CODE, platform: '8', pageIndex, pageSize: 100 },
+      { cookieState, fetchImpl }
+    ).catch((err) => {
+      console.warn(`Taopiaopiao soon page ${pageIndex} fetch failed:`, err?.message || err);
+      return [];
+    });
+    if (!Array.isArray(page) || page.length === 0) break;
+    soon.push(...page);
+    if (page.length < 100) break;
+  }
 
   for (const raw of [...hot, ...soon]) {
     const entry = normalizeEntry(raw);

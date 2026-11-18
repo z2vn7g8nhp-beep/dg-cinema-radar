@@ -9,9 +9,9 @@ import {
 } from '../lib/radar.mjs';
 import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
-import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
+import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, looksLikeMandarinPinyinOf, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
-import { buildMtopSign, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
+import { buildMtopSign, fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
 import { selectMoviesForIntelEnrichment } from '../monitor.mjs';
 import sodium from 'libsodium-wrappers';
 import webpush from 'web-push';
@@ -580,4 +580,94 @@ test('v2 bilingual matcher rejects deep_water_2026, single-char V collisions, wr
       new Response('<search-page-media-row release-year="2024" tomatometer-score="97"><a href="https://www.rottentomatoes.com/m/crossing_2024" slot="title">Crossing</a></search-page-media-row>', { status: 200 })
   });
   assert.equal(rtResSingle, null);
+});
+
+test('v3 bilingual pinyin matcher blocks Corpus/Godzilla/PaperBride false hits while keeping Yu Jin and Ye ye', async () => {
+  assert.equal(looksLikeMandarinPinyinOf('Ye ye nai nai na xie shi', ['爷爷奶奶那些事']), true);
+  assert.equal(looksLikeMandarinPinyinOf('Yu Jin', ['我们仅有一次的人生', '余烬']), true);
+  assert.equal(looksLikeMandarinPinyinOf('Corpus', ['活色生香']), false);
+  assert.equal(looksLikeMandarinPinyinOf('Godzilla X Kong: The New Empire', ['大圣崛起']), false);
+  assert.equal(looksLikeMandarinPinyinOf('Red Wedding Dress: Paper Bride', ['红衣新娘·子怨']), false);
+
+  const mockImdb = async (url) => {
+    const u = decodeURIComponent(String(url));
+    if (u.includes('活色生香')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt38117143', l: 'Corpus', y: 2026, qid: 'movie', s: 'Jeff Wahlberg' }] }), { status: 200 });
+    }
+    if (u.includes('大圣崛起')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt14539740', l: 'Godzilla X Kong: The New Empire', y: 2024, qid: 'movie' }] }), { status: 200 });
+    }
+    if (u.includes('红衣新娘·子怨')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt35871402', l: 'Red Wedding Dress: Paper Bride', y: 2025, qid: 'movie' }] }), { status: 200 });
+    }
+    if (u.includes('我们仅有一次的人生')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt36424371', l: 'Yu Jin', y: 2026, qid: 'movie' }] }), { status: 200 });
+    }
+    if (u.includes('agregarr')) {
+      return new Response(JSON.stringify([{ rating: 5.0, votes: 120 }]), { status: 200 });
+    }
+    return new Response(JSON.stringify({ d: [] }), { status: 200 });
+  };
+
+  const fake1 = await fetchImdbIntel({ title: '活色生香', enm: 'Waiting for Myself', year: 2026, dir: '罗冬', fetchImpl: mockImdb });
+  assert.equal(fake1, null);
+  const fake2 = await fetchImdbIntel({ title: '大圣崛起', enm: '', year: 2026, fetchImpl: mockImdb });
+  assert.equal(fake2, null);
+  const fake3 = await fetchImdbIntel({ title: '红衣新娘·子怨', enm: 'bride in red: blood vendetta', year: 2026, fetchImpl: mockImdb });
+  assert.equal(fake3, null);
+
+  const okPinyin = await fetchImdbIntel({
+    title: '我们仅有一次的人生',
+    enm: 'Embers',
+    zhTitles: ['余烬'],
+    year: 2026,
+    fetchImpl: mockImdb
+  });
+  assert.equal(okPinyin.imdbId, 'tt36424371');
+  assert.equal(okPinyin.imdbScore, 5);
+});
+
+test('taopiaopiao catalog paginates soon shows page 2 when page 1 hits 100 items and dynamics uses monitored cinema details', async () => {
+  const fakeFetch = async (url) => {
+    const u = new URL(url);
+    const hasToken = Boolean(u.searchParams.get('sign') && u.searchParams.get('sign') !== '00000000000000000000000000000000');
+    if (!hasToken) {
+      return {
+        status: 200,
+        headers: { getSetCookie: () => ['_m_h5_tk=tok123_999; Path=/'] },
+        text: async () => '{}'
+      };
+    }
+    const api = u.searchParams.get('api') || '';
+    const data = JSON.parse(u.searchParams.get('data') || '{}');
+    if (api.includes('getshowsbycitycode')) {
+      return { status: 200, headers: {}, text: async () => JSON.stringify({ ret: ['SUCCESS::调用成功'], data: { returnValue: [{ id: 1, showName: '热映片A', wantCount: 1000 }] } }) };
+    }
+    if (api.includes('getsoonshowsbycitycode') && data.pageIndex === 1) {
+      const p1 = Array.from({ length: 100 }, (_, i) => ({ id: 100 + i, showName: `待映片${i}`, wantCount: 500 + i }));
+      return { status: 200, headers: {}, text: async () => JSON.stringify({ ret: ['SUCCESS::调用成功'], data: { returnValue: p1 } }) };
+    }
+    if (api.includes('getsoonshowsbycitycode') && data.pageIndex === 2) {
+      return { status: 200, headers: {}, text: async () => JSON.stringify({ ret: ['SUCCESS::调用成功'], data: { returnValue: [{ id: 999, showName: '流浪地球3', wantCount: 880000 }] } }) };
+    }
+    return { status: 200, headers: {}, text: async () => JSON.stringify({ ret: ['SUCCESS::调用成功'], data: { returnValue: [] } }) };
+  };
+
+  const tpp = await fetchTaopiaopiaoCatalog({ fetchImpl: fakeFetch });
+  assert.equal(tpp.ok, true);
+  assert.equal(tpp.count, 102);
+  assert.equal(matchTaopiaopiaoMovie({ nm: '流浪地球3' }, tpp).tppWish, 880000);
+
+  const dyn = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T12:00:00Z',
+    prevCatalogMap: { '50': { id: 50, nm: '新开票片', rt: '2026-11-20', statusLabel: '想看' } },
+    currMovies: [{ id: 50, nm: '新开票片', rt: '2026-11-20', statusLabel: '预售', showInfo: '今天7家影院放映14场' }],
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set([50]),
+    currCinemaDetailMap: new Map([[50, '华南MALL IMAX GT 2场 · 民盈国贸城 CGV 1场']])
+  });
+  const openEv = dyn.find((e) => e.type === 'presale_opened');
+  assert.equal(openEv.detail, '华南MALL IMAX GT 2场 · 民盈国贸城 CGV 1场');
 });

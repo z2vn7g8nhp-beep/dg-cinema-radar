@@ -83,6 +83,7 @@ export function detectDynamicEvents({
   currIntelMap = {},
   prevCinemaMovieIds = new Set(),
   currCinemaMovieIds = new Set(),
+  currCinemaDetailMap = new Map(),
   todayStr,
   nowIso,
   baselineReady = false
@@ -160,6 +161,8 @@ export function detectDynamicEvents({
     const isBuyableNow = /预售|购票/.test(currStatus) || currCinemaMovieIds.has(id);
     const wasBuyableBefore = Boolean(prev && (/预售|购票/.test(prevStatus) || prevCinemaMovieIds.has(id)));
     if (isBuyableNow && !wasBuyableBefore && !isOldMovieBeyondWindow(currRt, todayStr)) {
+      const monitoredDetail = currCinemaDetailMap.get(id) || '';
+      const fallbackCityDetail = curr.showInfo ? `全市：${curr.showInfo}` : '';
       events.push({
         id: `dyn_open_${id}_${todayStr}`,
         type: 'presale_opened',
@@ -168,7 +171,7 @@ export function detectDynamicEvents({
         title: curr.nm,
         poster: curr.img || '',
         summary: currCinemaMovieIds.has(id) ? '东莞监控影院已开启预售/购票' : `猫眼状态已开启「${currStatus || '预售'}」`,
-        detail: curr.showInfo || currRt || '已开启预售购票',
+        detail: monitoredDetail || fallbackCityDetail || currRt || '已开启预售购票',
         createdAt: nowIso
       });
     }

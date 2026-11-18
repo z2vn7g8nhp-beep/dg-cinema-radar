@@ -8,13 +8,32 @@
 
 import { fetchMaoyanMovieDetail, jitterDelay, sleep } from './maoyan.mjs';
 
-export const INTEL_MATCH_VERSION = 2;
+export const INTEL_MATCH_VERSION = 3;
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 const SEQUEL_TOKENS = new Set(['2', '3', '4', '5', '6', 'ii', 'iii', 'iv', 'v', 'two', 'three', 'four']);
 const STOP_TOKENS = new Set(['the', 'a', 'an', 'of', 'and', 'or', 'in', 'on', 'at', 'to', 'for']);
+const MANDARIN_PINYIN_SYLLABLE_RE =
+  /^(?:[bpmfdtnlgkhjqxrzcsyw]|[zcs]h)?(?:a|o|e|ai|ei|ao|ou|an|en|ang|eng|ong|er|i|ia|io|ie|iu|iao|ian|in|iang|ing|iong|u|ua|uo|uai|ui|uan|un|uang|ueng|v|ve|van|vn)$/;
+
+export function looksLikeMandarinPinyinOf(latinStr = '', zhTargets = []) {
+  const cleaned = String(latinStr || '').trim();
+  if (!cleaned || /[:\d]/.test(cleaned)) return false;
+  const tokens = cleaned
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length < 2) return false;
+  if (!tokens.every((t) => MANDARIN_PINYIN_SYLLABLE_RE.test(t))) return false;
+
+  return (zhTargets || []).some((zh) => {
+    const cjk = String(zh || '').match(/[\u4e00-\u9fff]/g) || [];
+    return cjk.length >= 2 && tokens.length === cjk.length;
+  });
+}
 
 export function extractYear(dateStr = '') {
   const m = String(dateStr || '').match(/(\d{4})/);
@@ -275,6 +294,7 @@ export async function fetchImdbIntel({
   enm = '',
   title = '',
   akaList = [],
+  zhTitles = [],
   year = null,
   allowedYears = [],
   dir = '',
@@ -313,6 +333,7 @@ export async function fetchImdbIntel({
     );
     const hasChineseDir = /[\u4e00-\u9fff]/.test(String(dir || ''));
     const isSingleWordEn = enQuery ? tokenizeLatin(enQuery).length <= 1 : true;
+    const zhPool = Array.from(new Set([title, ...zhTitles].filter((t) => /[\u4e00-\u9fff]/.test(String(t || '')))));
 
     let best = null;
     let bestScore = -999;
@@ -338,15 +359,16 @@ export async function fetchImdbIntel({
         base = 96;
       }
 
-      // Even if Maoyan enm differs slightly (translated English title), exact Chinese query hit on IMDb is strong proof
       if (hitZh) {
         if (base < 0) {
-          // Allow zh-only IMDb hit only if it is the top Chinese search hit and year is compatible
+          // Only allow a zh-only IMDb hit when its title fails enm/akaList IF it is rank #0, within <=2y, AND matches Mandarin pinyin of Chinese title/aliases (e.g. "Yu Jin", "Ye ye nai nai na xie shi"). Never let unrelated foreign titles like "Corpus" or "Godzilla X Kong" pass blindly.
           const zhRank = zhMovies.findIndex((z) => z.id === c.id);
-          base = zhRank === 0 ? 75 : zhRank === 1 ? 55 : -999;
-          if (candYear && yearsPool.length > 0) {
-            const minDiff = Math.min(...yearsPool.map((y) => Math.abs(candYear - y)));
-            base += minDiff === 0 ? 40 : minDiff === 1 ? 25 : -10;
+          const minDiff = candYear && yearsPool.length > 0 ? Math.min(...yearsPool.map((y) => Math.abs(candYear - y))) : 99;
+          const isPinyin = looksLikeMandarinPinyinOf(c.l, zhPool);
+          if (zhRank === 0 && minDiff <= 2 && isPinyin) {
+            base = 80 + (minDiff === 0 ? 40 : minDiff === 1 ? 25 : -10);
+          } else {
+            continue;
           }
         }
         base += hitEn ? 100 : 60;
@@ -602,6 +624,9 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     doubanScore: basePrev.doubanScore ?? null,
     doubanVotes: basePrev.doubanVotes || 0,
     doubanYear: basePrev.doubanYear ?? null,
+    doubanAka: Array.isArray(basePrev.doubanAka) ? basePrev.doubanAka : [],
+    doubanZhAka: Array.isArray(basePrev.doubanZhAka) ? basePrev.doubanZhAka : [],
+    doubanMetaLoaded: Boolean(basePrev.doubanMetaLoaded),
     imdbId: basePrev.imdbId || '',
     imdbUrl: basePrev.imdbUrl || '',
     imdbScore: basePrev.imdbScore ?? null,
@@ -637,10 +662,11 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
   }
 
   const maoyanYear = extractYear(next.origRt || movie.rt || next.pubDesc);
-  const akaList = [];
+  const akaList = [...(next.doubanAka || [])];
+  const zhTitles = [...(next.doubanZhAka || [])];
 
   // Douban (matched by Chinese + English + director/year)
-  if (!next.doubanScore || !next.doubanId || !next.doubanYear) {
+  if (!next.doubanScore || !next.doubanId || !next.doubanYear || !next.doubanMetaLoaded) {
     try {
       await sleep(jitterDelay(250, 500));
       const db = await fetchDoubanIntel({
@@ -654,18 +680,30 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
       if (db) {
         next.doubanId = db.doubanId;
         next.doubanUrl = db.doubanUrl;
+        next.doubanMetaLoaded = true;
         if (db.doubanScore !== null) next.doubanScore = db.doubanScore;
         if (db.doubanVotes > 0) next.doubanVotes = db.doubanVotes;
         if (db.doubanYear) next.doubanYear = db.doubanYear;
         if (!hasLatinLetters(next.enm) && db.enmFromDouban) next.enm = db.enmFromDouban;
+        const latinAlias = [];
+        const zhAlias = [];
         for (const t of [db.doubanOrigTitle, ...(db.doubanAka || [])]) {
-          if (t && hasLatinLetters(t)) akaList.push(t);
+          if (!t) continue;
+          if (hasLatinLetters(t)) latinAlias.push(t);
+          if (/[\u4e00-\u9fff]/.test(t)) zhAlias.push(t);
         }
+        next.doubanAka = Array.from(new Set([...(next.doubanAka || []), ...latinAlias])).slice(0, 8);
+        next.doubanZhAka = Array.from(new Set([...(next.doubanZhAka || []), ...zhAlias])).slice(0, 8);
+        akaList.push(...latinAlias);
+        zhTitles.push(...zhAlias);
       }
     } catch {
       // Keep previous Douban state
     }
   }
+
+  const dedupAkaList = Array.from(new Set(akaList));
+  const dedupZhTitles = Array.from(new Set(zhTitles));
 
   // Prefer Douban's true production year when Maoyan shows a later re-release date (e.g. Dune 2021 re-released in 2026)
   const isRerelease = /重映|4k|imax/i.test(movie.nm || '');
@@ -686,7 +724,8 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
       const im = await fetchImdbIntel({
         enm: next.enm,
         title: movie.nm,
-        akaList,
+        akaList: dedupAkaList,
+        zhTitles: dedupZhTitles,
         year: primaryYear,
         allowedYears,
         dir: next.dir,
@@ -718,7 +757,7 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
       const rt = await fetchRottenTomatoesIntel({
         enm: next.enm,
         title: movie.nm,
-        akaList,
+        akaList: dedupAkaList,
         year: primaryYear,
         allowedYears,
         dir: next.dir,

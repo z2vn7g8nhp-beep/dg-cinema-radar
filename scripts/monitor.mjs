@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CINEMAS, getBeijingDateStr, shiftDateStr } from './lib/config.mjs';
+import { CINEMAS, CINEMA_MAP, getBeijingDateStr, shiftDateStr } from './lib/config.mjs';
 import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
 import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
@@ -65,6 +65,28 @@ function collectCinemaMovieIds(cinemasObj = {}) {
     }
   }
   return ids;
+}
+
+function collectCinemaDetailMap(cinemasObj = {}) {
+  const perMovie = new Map();
+  for (const c of Object.values(cinemasObj)) {
+    const cMeta = CINEMA_MAP.get(Number(c?.cinemaId));
+    const cLabel = cMeta?.shortName || c?.cinemaName || '';
+    if (!cLabel) continue;
+    for (const m of c?.movies || []) {
+      const alertableCount = (m.shows || []).filter((s) => s.alertable).length;
+      if (alertableCount > 0 && m.id) {
+        const id = Number(m.id);
+        if (!perMovie.has(id)) perMovie.set(id, []);
+        perMovie.get(id).push(`${cLabel} ${alertableCount}场`);
+      }
+    }
+  }
+  const detailMap = new Map();
+  for (const [id, parts] of perMovie.entries()) {
+    detailMap.set(id, parts.join(' · '));
+  }
+  return detailMap;
 }
 
 export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchItems, nowIso, todayStr = '', maxBudget = 16 }) {
@@ -340,6 +362,7 @@ async function main() {
     }
   }
   const currCinemaMovieIds = collectCinemaMovieIds(mergedCinemas);
+  const currCinemaDetailMap = collectCinemaDetailMap(mergedCinemas);
 
   // 2. Fetch expanded catalog, wish growth, cross-platform scores & dynamic events
   let nextCatalog = prevPublic.catalog || { onInfo: [], coming: [] };
@@ -362,9 +385,12 @@ async function main() {
       const enrichedComing = attachWishGrowth(cat.coming, nextWishSnapshots);
       const allEnriched = [...enrichedOnInfo, ...enrichedComing];
 
-      // Prune intel cache to active catalog + starred movies & scrub legacy unverified v1 scores
+      // Prune intel cache to active catalog + starred movies & upgrade legacy entries safely
+      const upgradeCount = Object.values(nextIntelMap).filter(
+        (v) => v && v.matchVersion !== INTEL_MATCH_VERSION
+      ).length;
       const hadLegacyV1Intel = Object.values(nextIntelMap).some(
-        (v) => v && v.matchVersion !== INTEL_MATCH_VERSION && (v.imdbUrl || v.rtUrl || v.doubanId)
+        (v) => v && Number(v.matchVersion || 1) < 2 && (v.imdbUrl || v.rtUrl || v.doubanId)
       );
       if (hadLegacyV1Intel) {
         nextDynamics = nextDynamics.filter((d) => d.type !== 'scored');
@@ -379,15 +405,22 @@ async function main() {
         if (v.matchVersion === INTEL_MATCH_VERSION) {
           prunedIntel[k] = v;
         } else {
+          // Keep verified Maoyan & Douban metadata while re-verifying IMDb/RT under strict v3 bilingual Pinyin rules
           prunedIntel[k] = {
             movieId: v.movieId || Number(k),
             enm: v.enm || '',
             cat: v.cat || '',
             dur: v.dur || 0,
             dir: v.dir || '',
+            origRt: v.origRt || '',
             pubDesc: v.pubDesc || '',
             maoyanScore: v.maoyanScore ?? null,
             maoyanVotes: v.maoyanVotes || 0,
+            doubanId: Number(v.matchVersion || 1) >= 2 ? (v.doubanId || '') : '',
+            doubanUrl: Number(v.matchVersion || 1) >= 2 ? (v.doubanUrl || '') : '',
+            doubanScore: Number(v.matchVersion || 1) >= 2 ? (v.doubanScore ?? null) : null,
+            doubanVotes: Number(v.matchVersion || 1) >= 2 ? (v.doubanVotes || 0) : 0,
+            doubanYear: Number(v.matchVersion || 1) >= 2 ? (v.doubanYear ?? null) : null,
             tppId: v.tppId ?? null,
             tppWish: v.tppWish ?? null,
             tppScore: v.tppScore ?? null
@@ -396,7 +429,7 @@ async function main() {
       }
       nextIntelMap = prunedIntel;
 
-      // Sync Taopiaopiao catalog once (2 requests -> all 100+ movies' wantCount, score & English title)
+      // Sync Taopiaopiao catalog once (hot + 2~3 coming pages -> all 160+ movies' wantCount & score)
       let tppCatalog = null;
       try {
         tppCatalog = await fetchTaopiaopiaoCatalog();
@@ -426,7 +459,7 @@ async function main() {
       }
 
       // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within 5-min cadence
-      const budget = mode === 'refresh_catalog' ? 28 : 20;
+      const budget = upgradeCount > 20 ? 40 : (mode === 'refresh_catalog' ? 28 : 20);
       const toEnrich = selectMoviesForIntelEnrichment({
         catalogMovies: allEnriched,
         intelMap: nextIntelMap,
@@ -436,12 +469,28 @@ async function main() {
         maxBudget: budget
       });
 
+      const recheckedIds = new Set();
       for (const targetMovie of toEnrich) {
         const key = String(targetMovie.id);
+        recheckedIds.add(Number(targetMovie.id));
         nextIntelMap[key] = await enrichMovieIntel(targetMovie, nextIntelMap[key] || {}, {
           cookie,
           omdbApiKey,
           tppMatch: tppMatchedMap.get(Number(targetMovie.id)) || null
+        });
+      }
+
+      // Scrub stale historical `scored` dynamics whose movie score was invalidated by stricter v3 matching
+      if (recheckedIds.size > 0) {
+        nextDynamics = nextDynamics.filter((d) => {
+          if (d.type !== 'scored' || !recheckedIds.has(Number(d.movieId))) return true;
+          const ci = nextIntelMap[String(d.movieId)];
+          if (!ci) return true;
+          const sum = String(d.summary || '');
+          if (/\bIMDb\b/.test(sum) && !(ci.imdbScore > 0)) return false;
+          if (/烂番茄/.test(sum) && (ci.rtCriticsScore === null || ci.rtCriticsScore === undefined)) return false;
+          if (/豆瓣/.test(sum) && !(ci.doubanScore > 0)) return false;
+          return true;
         });
       }
 
@@ -453,6 +502,7 @@ async function main() {
         currIntelMap: nextIntelMap,
         prevCinemaMovieIds,
         currCinemaMovieIds,
+        currCinemaDetailMap,
         todayStr,
         nowIso,
         baselineReady: catalogBaselineReady

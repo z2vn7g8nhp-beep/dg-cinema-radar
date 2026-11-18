@@ -621,9 +621,62 @@ main, .sheet, .movie-row, .movie-meta {
 }
 
 /* Cinema Showtimes */
+.cinema-segs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 12px;
+}
+
+.cinema-seg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 6px;
+  border-radius: 14px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink-secondary);
+  cursor: pointer;
+  min-width: 0;
+  text-align: center;
+  transition: all 0.14s ease;
+}
+
+.cinema-seg-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.cinema-seg-sub {
+  font-size: 10px;
+  color: var(--ink-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.cinema-seg.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+.cinema-seg.active .cinema-seg-sub {
+  color: rgba(255, 255, 255, 0.72);
+}
+
 .pill-group {
   display: flex;
-  gap: 7px;
+  gap: 6px;
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
@@ -638,13 +691,13 @@ main, .sheet, .movie-row, .movie-meta {
 
 .chip {
   flex-shrink: 0;
-  min-height: 33px;
-  padding: 5px 14px;
+  min-height: 30px;
+  padding: 4px 11px;
   border-radius: 999px;
   border: 1px solid var(--hairline);
   background: var(--surface);
   color: var(--ink-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -657,7 +710,7 @@ main, .sheet, .movie-row, .movie-meta {
 
 .showtime-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(102px, 1fr));
   gap: 7px;
   margin-top: 10px;
 }
@@ -680,12 +733,26 @@ main, .sheet, .movie-row, .movie-meta {
   border-color: rgba(180, 83, 9, 0.22);
 }
 
+.showtime-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+}
+
 .showtime-tm {
   font-size: 15px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
   line-height: 1.2;
+}
+
+.showtime-dt {
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
 }
 
 .showtime-tag {
@@ -705,11 +772,14 @@ main, .sheet, .movie-row, .movie-meta {
 
 .showtime-hall {
   font-size: 10.5px;
+  line-height: 1.3;
   color: var(--ink-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 /* Radar Stats Strip */
@@ -946,6 +1016,12 @@ main, .sheet, .movie-row, .movie-meta {
   outline: none;
 }
 
+.select {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
 .input:focus, .select:focus, .textarea:focus {
   border-color: var(--ink);
   background: #ffffff;
@@ -1072,6 +1148,19 @@ main, .sheet, .movie-row, .movie-meta {
   overflow-y: auto;
   overflow-x: hidden;
   box-shadow: 0 24px 60px rgba(15, 15, 22, 0.25);
+}
+
+.modal-sheet.modal-sheet-flex {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.picker-scroll-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-sheet-pad {
