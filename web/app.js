@@ -35,6 +35,7 @@ const appState = {
   wakeLock: null,
   sentinelTimer: null,
   generatedVapid: null,
+  pairingFeedback: null,
   busy: false
 };
 
@@ -167,24 +168,32 @@ async function generateBrowserVapidKeys() {
   };
 }
 
+function applyPairingPayload(rawValue) {
+  const text = String(rawValue || '').trim();
+  const hashIdx = text.indexOf('#pair=');
+  const encoded = hashIdx >= 0 ? text.slice(hashIdx + '#pair='.length) : text;
+  const jsonStr = new TextDecoder().decode(base64UrlToUint8Array(encoded));
+  const parsed = JSON.parse(jsonStr);
+  if (!parsed.token || !parsed.gistId) {
+    throw new Error('配对链接缺少 token 或 gistId');
+  }
+  saveConfig({
+    owner: parsed.owner || appState.config.owner,
+    repo: parsed.repo || appState.config.repo,
+    gistId: parsed.gistId,
+    token: parsed.token,
+    vapidPublicKeyOverride: parsed.vapidPublicKey || appState.config.vapidPublicKeyOverride || ''
+  });
+  return parsed;
+}
+
 function checkIncomingPairingHash() {
   const hash = window.location.hash || '';
   if (!hash.startsWith('#pair=')) return;
   try {
-    const raw = hash.slice('#pair='.length);
-    const jsonStr = new TextDecoder().decode(base64UrlToUint8Array(raw));
-    const parsed = JSON.parse(jsonStr);
-    if (parsed.token && parsed.gistId) {
-      saveConfig({
-        owner: parsed.owner || appState.config.owner,
-        repo: parsed.repo || appState.config.repo,
-        gistId: parsed.gistId,
-        token: parsed.token,
-        vapidPublicKeyOverride: parsed.vapidPublicKey || ''
-      });
-      history.replaceState(null, '', window.location.pathname + window.location.search);
-      showToast('已导入朋友配对配置！请点击「提醒与设置」开启本机通知', 4200);
-    }
+    applyPairingPayload(hash);
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    showToast('已导入朋友配对配置！请点击「提醒与设置」开启本机通知', 4200);
   } catch (err) {
     console.warn('Pairing hash parse failed:', err);
   }
@@ -203,6 +212,21 @@ function isPaired() {
   return Boolean(appState.config.token && appState.config.gistId);
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('请求超时（国内直连 GitHub 较慢时可稍后再试或切换网络）');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function ghFetch(url, options = {}) {
   const headers = {
     'Accept': 'application/vnd.github+json',
@@ -210,7 +234,7 @@ async function ghFetch(url, options = {}) {
     ...(appState.config.token ? { Authorization: `Bearer ${appState.config.token}` } : {}),
     ...(options.headers || {})
   };
-  const res = await fetch(url, { ...options, headers, cache: 'no-store' });
+  const res = await fetchWithTimeout(url, { ...options, headers, cache: 'no-store' }, 12000);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`GitHub API ${res.status}: ${text.slice(0, 140)}`);
@@ -236,7 +260,7 @@ async function loadPublicState() {
             ...(appState.config.token ? { Authorization: `Bearer ${appState.config.token}` } : {})
           }
         : {};
-      const res = await fetch(urls[i], { headers, cache: 'no-store' });
+      const res = await fetchWithTimeout(urls[i], { headers, cache: 'no-store' }, i === 2 ? 4000 : 7000);
       if (!res.ok) continue;
       const data = await res.json();
       if (data && typeof data === 'object') {
@@ -297,7 +321,7 @@ async function createPrivateGistWithToken(token) {
     'runtime.json': { content: '{}' },
     'alerts.json': { content: '[]' }
   };
-  const res = await fetch('https://api.github.com/gists', {
+  const res = await fetchWithTimeout('https://api.github.com/gists', {
     method: 'POST',
     headers: {
       'Accept': 'application/vnd.github+json',
@@ -310,7 +334,7 @@ async function createPrivateGistWithToken(token) {
       public: false,
       files: initialFiles
     })
-  });
+  }, 12000);
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`创建 Gist 失败 (${res.status}): ${txt.slice(0, 140)}`);
@@ -335,14 +359,16 @@ async function triggerWorkflow(mode = 'tick') {
 
 async function syncAllData({ silent = false } = {}) {
   try {
-    await loadPublicState();
-    if (isPaired()) {
-      await loadPrivateGist();
-    }
+    await Promise.all([
+      loadPublicState(),
+      isPaired() ? loadPrivateGist() : Promise.resolve(null)
+    ]);
     checkNewAlertForSentinel();
-    render();
+    render({ preserveFocusedSettings: silent });
+    return { ok: true };
   } catch (err) {
-    if (!silent) showToast(`同步失败: ${err.message}`);
+    if (!silent) showToast(`同步失败: ${err.message}`, 4200);
+    return { ok: false, error: err.message };
   }
 }
 
@@ -1271,7 +1297,14 @@ function renderSettingsTab(root) {
       <div class="card-header">
         <div>
           <div class="card-title">4. GitHub 配对 & 朋友一键分享</div>
-          <div class="muted">Fine-Grained Token 只需勾选：Gists (Read & Write) + 本仓库 Actions (Read & Write)</div>
+          <div class="muted">支持直接粘贴配对链接，或手动填写 Token 与私有 Gist ID</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>快速导入（把 PAIR_URL.txt 里的 #pair= 链接整条贴进来即可）</label>
+        <div class="row">
+          <input id="quickPairUrlInput" class="input" style="flex:1" placeholder="https://...#pair=..." />
+          <button class="btn btn-gold btn-sm" id="importPairUrlBtn" type="button">一键导入</button>
         </div>
       </div>
       <div class="row" style="gap:8px">
@@ -1285,8 +1318,8 @@ function renderSettingsTab(root) {
         </div>
       </div>
       <div class="field">
-        <label>GitHub Fine-Grained PAT（仅存本机浏览器）</label>
-        <input id="cfgToken" type="password" class="input" value="${escapeHtml(cfg.token)}" placeholder="github_pat_..." />
+        <label>GitHub PAT（ghp_... 或 github_pat_...，仅存本机浏览器）</label>
+        <input id="cfgToken" type="password" class="input" value="${escapeHtml(cfg.token)}" placeholder="ghp_... 或 github_pat_..." />
       </div>
       <div class="field">
         <label>私有 Gist ID（填入已有 ID，或填好上方 Token 后点一键创建）</label>
@@ -1299,6 +1332,13 @@ function renderSettingsTab(root) {
         <button class="btn btn-primary" id="savePairingBtn" type="button">保存配对并同步</button>
         <button class="btn" id="sharePairLinkBtn" type="button">🔗 生成朋友专属配对链接</button>
       </div>
+      ${
+        appState.pairingFeedback
+          ? `<div class="muted" style="margin-top:8px;color:${appState.pairingFeedback.ok ? 'var(--green)' : 'var(--red)'}">${escapeHtml(appState.pairingFeedback.text)}</div>`
+          : isPaired()
+            ? `<div class="muted" style="margin-top:8px;color:var(--green)">已填写配对信息（Gist: ${escapeHtml(cfg.gistId.slice(0, 8))}...，当前已订阅设备 ${subs.length} 台）</div>`
+            : `<div class="muted" style="margin-top:8px">尚未完成配对：请先粘贴上方配对链接，或填写 Token 与 Gist ID。</div>`
+      }
     </div>
 
     <div class="card">
@@ -1431,15 +1471,72 @@ Body (Raw JSON):
     }
   };
 
+  document.getElementById('importPairUrlBtn').onclick = async () => {
+    const raw = document.getElementById('quickPairUrlInput').value.trim();
+    if (!raw) {
+      showToast('请先粘贴包含 #pair= 的配对链接');
+      return;
+    }
+    const btn = document.getElementById('importPairUrlBtn');
+    btn.disabled = true;
+    btn.textContent = '导入中...';
+    try {
+      applyPairingPayload(raw);
+      const res = await syncAllData();
+      if (res.ok) {
+        appState.pairingFeedback = {
+          ok: true,
+          text: `✅ 导入并同步成功！已连接私有 Gist（星标 ${appState.privateState.watchlist.length} 部，设备 ${appState.privateState.subscriptions.length} 台）`
+        };
+        showToast('配对链接导入成功！现在可以点顶部开启推送');
+        render();
+      } else {
+        appState.pairingFeedback = { ok: false, text: `❌ 链接已导入但连接 Gist 失败：${res.error}` };
+        render();
+      }
+    } catch (err) {
+      appState.pairingFeedback = { ok: false, text: `❌ 链接解析失败：${err.message}` };
+      showToast(`导入失败: ${err.message}`);
+      render();
+    }
+  };
+
   document.getElementById('savePairingBtn').onclick = async () => {
-    saveConfig({
-      owner: document.getElementById('cfgOwner').value.trim() || DEFAULT_REPO_OWNER,
-      repo: document.getElementById('cfgRepo').value.trim() || DEFAULT_REPO_NAME,
-      token: document.getElementById('cfgToken').value.trim(),
-      gistId: document.getElementById('cfgGistId').value.trim()
-    });
-    await syncAllData();
-    showToast('配对信息已保存并同步');
+    const owner = document.getElementById('cfgOwner').value.trim() || DEFAULT_REPO_OWNER;
+    const repo = document.getElementById('cfgRepo').value.trim() || DEFAULT_REPO_NAME;
+    const token = document.getElementById('cfgToken').value.trim();
+    const gistId = document.getElementById('cfgGistId').value.trim();
+
+    saveConfig({ owner, repo, token, gistId });
+
+    if (!token || !gistId) {
+      appState.pairingFeedback = {
+        ok: false,
+        text: '❌ 请先填写 GitHub Token 和 私有 Gist ID（或点「一键导入」直接粘贴配对链接）'
+      };
+      showToast('请先填写 Token 和 私有 Gist ID');
+      render();
+      return;
+    }
+
+    const btn = document.getElementById('savePairingBtn');
+    btn.disabled = true;
+    btn.textContent = '验证并同步中...';
+
+    const res = await syncAllData();
+    if (res.ok) {
+      appState.pairingFeedback = {
+        ok: true,
+        text: `✅ 配对并同步成功！已连接私有 Gist（星标 ${appState.privateState.watchlist.length} 部，设备 ${appState.privateState.subscriptions.length} 台）`
+      };
+      showToast('配对信息已保存并同步成功');
+    } else {
+      appState.pairingFeedback = {
+        ok: false,
+        text: `❌ 已保存到本机，但连接 GitHub Gist 失败：${res.error}`
+      };
+    }
+    render();
   };
 
   document.getElementById('sharePairLinkBtn').onclick = () => {
@@ -1473,7 +1570,7 @@ Body (Raw JSON):
   document.getElementById('copyCronBodyBtn').onclick = () => copyText('{"ref":"main","inputs":{"mode":"tick"}}', 'Cron JSON Body');
 }
 
-function render() {
+function render({ preserveFocusedSettings = false } = {}) {
   renderTopStatus();
   renderDeviceBanner();
 
@@ -1482,6 +1579,16 @@ function render() {
   });
 
   const main = document.getElementById('mainContent');
+  if (
+    preserveFocusedSettings &&
+    appState.tab === 'settings' &&
+    document.activeElement &&
+    main.contains(document.activeElement) &&
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
+  ) {
+    return;
+  }
+
   if (appState.tab === 'radar') renderRadarTab(main);
   else if (appState.tab === 'cinemas') renderCinemasTab(main);
   else if (appState.tab === 'catalog') renderCatalogTab(main);

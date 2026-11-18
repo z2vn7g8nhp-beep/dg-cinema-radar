@@ -77,41 +77,14 @@ async function waitForMainRef(owner, repo, token, fetchImpl = fetch) {
   throw new Error('等待仓库 main 分支初始化超时，请检查仓库是否创建成功。');
 }
 
-export async function bootstrapGitHubProject({
+export async function pushFilesToRepoMain({
+  owner,
+  repoName,
   token,
-  repoName = 'dg-cinema-radar',
   rootDir = process.cwd(),
+  message = 'feat: initial Dongguan 3-cinema Maoyan radar web app',
   fetchImpl = fetch
 }) {
-  if (!token) throw new Error('Token 不能为空');
-
-  // 1. Identify user
-  const userRes = await ghApi('https://api.github.com/user', token, {}, fetchImpl);
-  if (!userRes.ok) {
-    throw new Error(`Token 验证失败 (${userRes.status}): ${JSON.stringify(userRes.data)}`);
-  }
-  const owner = userRes.data.login;
-
-  // 2. Create repository (or reuse if user already created it empty)
-  const createRepoRes = await ghApi(
-    'https://api.github.com/user/repos',
-    token,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        name: repoName,
-        private: false,
-        auto_init: true,
-        description: '东莞三影院（华南MALL IMAX GT / 东城万达IMAX / 民盈国贸城CGV）猫眼每轮开票监控与iPhone/华为双端PWA提醒雷达'
-      })
-    },
-    fetchImpl
-  );
-  if (!createRepoRes.ok && createRepoRes.status !== 422) {
-    throw new Error(`创建仓库失败 (${createRepoRes.status}): ${JSON.stringify(createRepoRes.data)}`);
-  }
-
-  // 3. Collect project files and push via Git Data API
   const parentCommitSha = await waitForMainRef(owner, repoName, token, fetchImpl);
   const parentCommitRes = await ghApi(
     `https://api.github.com/repos/${owner}/${repoName}/git/commits/${parentCommitSha}`,
@@ -166,7 +139,7 @@ export async function bootstrapGitHubProject({
     {
       method: 'POST',
       body: JSON.stringify({
-        message: 'feat: initial Dongguan 3-cinema Maoyan radar web app',
+        message,
         tree: treeRes.data.sha,
         parents: [parentCommitSha]
       })
@@ -189,6 +162,52 @@ export async function bootstrapGitHubProject({
   if (!refRes.ok) {
     throw new Error(`更新 main 分支失败 (${refRes.status}): ${JSON.stringify(refRes.data)}`);
   }
+
+  return files.length;
+}
+
+export async function bootstrapGitHubProject({
+  token,
+  repoName = 'dg-cinema-radar',
+  rootDir = process.cwd(),
+  fetchImpl = fetch
+}) {
+  if (!token) throw new Error('Token 不能为空');
+
+  // 1. Identify user
+  const userRes = await ghApi('https://api.github.com/user', token, {}, fetchImpl);
+  if (!userRes.ok) {
+    throw new Error(`Token 验证失败 (${userRes.status}): ${JSON.stringify(userRes.data)}`);
+  }
+  const owner = userRes.data.login;
+
+  // 2. Create repository (or reuse if user already created it empty)
+  const createRepoRes = await ghApi(
+    'https://api.github.com/user/repos',
+    token,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        name: repoName,
+        private: false,
+        auto_init: true,
+        description: '东莞三影院（华南MALL IMAX GT / 东城万达IMAX / 民盈国贸城CGV）猫眼每轮开票监控与iPhone/华为双端PWA提醒雷达'
+      })
+    },
+    fetchImpl
+  );
+  if (!createRepoRes.ok && createRepoRes.status !== 422) {
+    throw new Error(`创建仓库失败 (${createRepoRes.status}): ${JSON.stringify(createRepoRes.data)}`);
+  }
+
+  // 3. Collect project files and push via Git Data API
+  const uploadedFiles = await pushFilesToRepoMain({
+    owner,
+    repoName,
+    token,
+    rootDir,
+    fetchImpl
+  });
 
   // 4. Enable GitHub Pages (GitHub Actions workflow mode)
   let pagesEnabled = false;
@@ -314,7 +333,7 @@ export async function bootstrapGitHubProject({
     gistId,
     vapidPublicKey: vapid.publicKey,
     pagesEnabled,
-    uploadedFiles: files.length,
+    uploadedFiles,
     pairUrl
   };
 }
