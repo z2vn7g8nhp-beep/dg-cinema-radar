@@ -15,13 +15,19 @@ import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/
 import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
 import { INTEL_MATCH_VERSION, enrichMovieIntel } from './lib/intel.mjs';
-import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from './lib/dynamics.mjs';
+import {
+  attachWishGrowth,
+  buildDynamicsAlert,
+  dedupeCatalogMovies,
+  detectDynamicEvents,
+  updateWishSnapshots
+} from './lib/dynamics.mjs';
 import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
 import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
 const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
-export const DYNAMICS_EPOCH_VERSION = 2;
+export const DYNAMICS_EPOCH_VERSION = 3;
 
 export function resolveBaselineDynamics(prevPublic) {
   if (Number(prevPublic?.dynamicsVersion || 1) < DYNAMICS_EPOCH_VERSION) {
@@ -393,7 +399,7 @@ async function main() {
     const cat = await fetchMovieCatalog({ cookie });
     if (cat.ok) {
       const prevCatalogAll = [...(prevPublic.catalog?.onInfo || []), ...(prevPublic.catalog?.coming || [])];
-      const prevCatalogMap = Object.fromEntries(prevCatalogAll.map((m) => [String(m.id), m]));
+      const { map: prevCatalogMap } = dedupeCatalogMovies(prevCatalogAll);
 
       const allRawCatalog = [...cat.onInfo, ...cat.coming];
       nextWishSnapshots = updateWishSnapshots(nextWishSnapshots, allRawCatalog, todayStr);

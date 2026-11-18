@@ -73,13 +73,62 @@ function isOldMovieBeyondWindow(rt, todayStr) {
   return rt < shiftDateStr(todayStr, -14);
 }
 
+function statusRank(label = '') {
+  if (/购票/.test(label)) return 3;
+  if (/预售/.test(label)) return 2;
+  if (/想看/.test(label)) return 1;
+  return 0;
+}
+
+function mergeCatalogMoviePair(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const rtA = String(a.rt || '').trim();
+  const rtB = String(b.rt || '').trim();
+  const bestRt = isConcreteDate(rtA) && !isConcreteDate(rtB) ? rtA : (isConcreteDate(rtB) ? rtB : rtA || rtB);
+  const bestStatus = statusRank(b.statusLabel) > statusRank(a.statusLabel) ? b.statusLabel : (a.statusLabel || b.statusLabel || '');
+  const pickLonger = (x, y) => (String(x || '').trim().length >= String(y || '').trim().length ? (x || y || '') : y);
+  return {
+    ...a,
+    ...b,
+    nm: a.nm || b.nm || '',
+    img: a.img || b.img || '',
+    rt: bestRt,
+    comingTitle: pickLonger(a.comingTitle, b.comingTitle),
+    showInfo: pickLonger(a.showInfo, b.showInfo),
+    star: pickLonger(a.star, b.star),
+    version: pickLonger(a.version, b.version),
+    statusLabel: bestStatus,
+    sc: Math.max(Number(a.sc || 0), Number(b.sc || 0)) || 0,
+    wish: Math.max(Number(a.wish || 0), Number(b.wish || 0)) || 0,
+    source: a.source === 'onInfo' || b.source === 'onInfo' ? 'onInfo' : (a.source || b.source || '')
+  };
+}
+
+/**
+ * Merges duplicate movie entries across Maoyan `onInfo` and `coming` lists without
+ * letting sparse `coming` stubs clobber concrete `onInfo` release dates or presale flags.
+ */
+export function dedupeCatalogMovies(movies = []) {
+  const byKey = new Map();
+  for (const item of movies) {
+    if (!item || !item.id) continue;
+    const key = String(item.id);
+    byKey.set(key, mergeCatalogMoviePair(byKey.get(key), item));
+  }
+  return {
+    list: [...byKey.values()],
+    map: Object.fromEntries(byKey)
+  };
+}
+
 /**
  * Only emit "开分" when a fresh/upcoming release newly receives a score —
  * never for >14d historical backfill, classic re-releases, or intel matchVersion upgrades.
  */
 function isEligibleForScoreOpening(curr, currRt, prevInt, currInt, todayStr) {
   if (isOldMovieBeyondWindow(currRt, todayStr)) return false;
-  if (/重映|4k/i.test(String(curr?.nm || ''))) return false;
+  if (/重映|4k/i.test(`${curr?.nm || ''} ${curr?.showInfo || ''}`)) return false;
 
   const curYear = Number(String(todayStr || '').slice(0, 4)) || new Date().getFullYear();
   const doubanYear = Number(currInt?.doubanYear || 0);
@@ -113,7 +162,8 @@ export function detectDynamicEvents({
     return events;
   }
 
-  for (const curr of currMovies) {
+  const uniqueCurrMovies = dedupeCatalogMovies(currMovies).list;
+  for (const curr of uniqueCurrMovies) {
     const id = Number(curr.id);
     const key = String(id);
     const prev = prevCatalogMap[key];

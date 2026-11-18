@@ -10,7 +10,7 @@ import {
 import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
 import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, looksLikeMandarinPinyinOf, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
-import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
+import { attachWishGrowth, buildDynamicsAlert, dedupeCatalogMovies, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
 import { buildMtopSign, fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
 import { DYNAMICS_EPOCH_VERSION, resolveBaselineDynamics, selectMoviesForIntelEnrichment } from '../monitor.mjs';
 import sodium from 'libsodium-wrappers';
@@ -732,4 +732,25 @@ test('resolveBaselineDynamics resets legacy dynamics before DYNAMICS_EPOCH_VERSI
     resolveBaselineDynamics({ dynamicsVersion: DYNAMICS_EPOCH_VERSION, dynamics: [{ id: 'fresh1' }] }),
     [{ id: 'fresh1' }]
   );
+});
+
+test('dedupeCatalogMovies preserves rich onInfo rt/status when a sparse coming stub shares the same movieId', () => {
+  const prevOnInfo = { id: 1441786, nm: '沙丘2', rt: '2026-12-04', statusLabel: '预售', showInfo: '2026-12-04重映', source: 'onInfo' };
+  const prevComingStub = { id: 1441786, nm: '沙丘2', rt: '', statusLabel: '想看', showInfo: '', source: 'coming' };
+  const { map: prevCatalogMap } = dedupeCatalogMovies([prevOnInfo, prevComingStub]);
+  assert.equal(prevCatalogMap['1441786'].rt, '2026-12-04');
+  assert.equal(prevCatalogMap['1441786'].statusLabel, '预售');
+
+  const events = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T15:15:00Z',
+    prevCatalogMap,
+    currMovies: [prevOnInfo, prevComingStub],
+    prevIntelMap: { '1441786': { matchVersion: 3, doubanYear: 2024, doubanScore: null } },
+    currIntelMap: { '1441786': { matchVersion: 3, doubanYear: 2024, doubanScore: 8.2 } },
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set()
+  });
+  assert.deepEqual(events, []);
 });
