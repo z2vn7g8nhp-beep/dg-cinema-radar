@@ -27,7 +27,7 @@ import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
 const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
-export const DYNAMICS_EPOCH_VERSION = 3;
+export const DYNAMICS_EPOCH_VERSION = 4;
 
 export function resolveBaselineDynamics(prevPublic) {
   if (Number(prevPublic?.dynamicsVersion || 1) < DYNAMICS_EPOCH_VERSION) {

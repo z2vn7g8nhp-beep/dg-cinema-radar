@@ -73,6 +73,18 @@ function isOldMovieBeyondWindow(rt, todayStr) {
   return rt < shiftDateStr(todayStr, -14);
 }
 
+function isPastPresaleWindow(rt, todayStr) {
+  if (!isConcreteDate(rt)) return false;
+  return rt < shiftDateStr(todayStr, -2);
+}
+
+function matchesComingTitleMonthDay(concreteRt, comingTitle) {
+  if (!isConcreteDate(concreteRt)) return false;
+  const m = String(comingTitle || '').match(/(\d{1,2})月(\d{1,2})日/);
+  if (!m) return false;
+  return Number(concreteRt.slice(5, 7)) === Number(m[1]) && Number(concreteRt.slice(8, 10)) === Number(m[2]);
+}
+
 function statusRank(label = '') {
   if (/购票/.test(label)) return 3;
   if (/预售/.test(label)) return 2;
@@ -188,7 +200,7 @@ export function detectDynamicEvents({
         });
       }
     } else {
-      if (!isConcreteDate(prevRt) && isConcreteDate(currRt)) {
+      if (!isConcreteDate(prevRt) && isConcreteDate(currRt) && !matchesComingTitleMonthDay(currRt, prev?.comingTitle)) {
         events.push({
           id: `dyn_sch_${id}_${currRt}`,
           type: 'scheduled',
@@ -212,7 +224,7 @@ export function detectDynamicEvents({
           detail: `原定 ${prevRt}，调整为 ${currRt}`,
           createdAt: nowIso
         });
-      } else if (isConcreteDate(prevRt) && !currRt) {
+      } else if (isConcreteDate(prevRt) && !currRt && !matchesComingTitleMonthDay(prevRt, curr.comingTitle)) {
         events.push({
           id: `dyn_resch_${id}_${prevRt}_tbd`,
           type: 'rescheduled',
@@ -227,10 +239,10 @@ export function detectDynamicEvents({
       }
     }
 
-    // 3. 开票 (presale_opened)
+    // 3. 开票 (presale_opened — only upcoming or within 2 days of release, not >2d-old catalog tails)
     const isBuyableNow = /预售|购票/.test(currStatus) || currCinemaMovieIds.has(id);
     const wasBuyableBefore = Boolean(prev && (/预售|购票/.test(prevStatus) || prevCinemaMovieIds.has(id)));
-    if (isBuyableNow && !wasBuyableBefore && !isOldMovieBeyondWindow(currRt, todayStr)) {
+    if (isBuyableNow && !wasBuyableBefore && !isPastPresaleWindow(currRt, todayStr)) {
       const monitoredDetail = currCinemaDetailMap.get(id) || '';
       const fallbackCityDetail = curr.showInfo ? `全市：${curr.showInfo}` : '';
       events.push({

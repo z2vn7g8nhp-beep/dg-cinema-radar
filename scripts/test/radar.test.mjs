@@ -754,3 +754,38 @@ test('dedupeCatalogMovies preserves rich onInfo rt/status when a sparse coming s
   });
   assert.deepEqual(events, []);
 });
+
+test('detectDynamicEvents ignores Maoyan coming stub rt="" flip-flop when comingTitle matches M月D日 and ignores >2d old presale tails', () => {
+  // 1. onInfo -> coming stub (rt '' with comingTitle '12月4日 周五') must not emit 调整为待定
+  const toStub = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T15:20:00Z',
+    prevCatalogMap: {
+      '1441786': { id: 1441786, nm: '沙丘2', rt: '2026-12-04', comingTitle: '12月4日 周五', statusLabel: '预售' }
+    },
+    currMovies: [
+      { id: 1441786, nm: '沙丘2', rt: '', comingTitle: '12月4日 周五', statusLabel: '想看' },
+      { id: 1510966, nm: '爷爷奶奶那些事', rt: '2026-11-10', statusLabel: '购票' }
+    ],
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set([1510966])
+  });
+  assert.deepEqual(toStub, []);
+
+  // 2. coming stub -> onInfo (rt '2026-12-04' returning when prev.comingTitle already had '12月4日 周五') must not emit 正式定档
+  const backToOnInfo = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T15:25:00Z',
+    prevCatalogMap: {
+      '1441786': { id: 1441786, nm: '沙丘2', rt: '', comingTitle: '12月4日 周五', statusLabel: '想看' }
+    },
+    currMovies: [
+      { id: 1441786, nm: '沙丘2', rt: '2026-12-04', comingTitle: '12月4日 周五', statusLabel: '想看' }
+    ],
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set()
+  });
+  assert.deepEqual(backToOnInfo, []);
+});
