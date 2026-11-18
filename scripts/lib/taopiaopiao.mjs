@@ -5,10 +5,17 @@
  */
 
 import crypto from 'node:crypto';
+import https from 'node:https';
 import { normalizeTitle } from './intel.mjs';
 
 const TPP_CITY_CODE = '441900'; // 东莞
 const TPP_APP_KEY = '12574478';
+const TPP_HOSTS = [
+  'acs.m.taopiaopiao.com',
+  'acs.m.taobao.com',
+  'guide-acs.m.taobao.com',
+  'h5api.m.taobao.com'
+];
 const TPP_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 
@@ -16,16 +23,43 @@ export function buildMtopSign(token, t, appKey, dataStr) {
   return crypto.createHash('md5').update(`${token}&${t}&${appKey}&${dataStr}`).digest('hex');
 }
 
-async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchImpl = fetch } = {}) {
+function defaultIpv4Get(url, headers = {}, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, family: 4, timeout: timeoutMs }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const setCookie = res.headers['set-cookie'] || [];
+        resolve({
+          status: res.statusCode || 0,
+          headers: {
+            get: (k) => res.headers[String(k).toLowerCase()] || null,
+            getSetCookie: () => (Array.isArray(setCookie) ? setCookie : [setCookie].filter(Boolean))
+          },
+          text: async () => text
+        });
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(Object.assign(new Error('Request timeout'), { code: 'ETIMEDOUT' })));
+  });
+}
+
+async function callMtopOnHost(host, api, v, dataObj, { cookieState, fetchImpl }) {
   const dataStr = JSON.stringify(dataObj);
-  const baseUrl = `https://acs.m.taopiaopiao.com/h5/${api}/${v}/`;
+  const baseUrl = `https://${host}/h5/${api}/${v}/`;
   const reqHeaders = {
     'User-Agent': TPP_UA,
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Origin': 'https://m.taopiaopiao.com',
     'Referer': 'https://m.taopiaopiao.com/'
   };
+
+  const doGet = (url, headers) =>
+    fetchImpl
+      ? fetchImpl(url, { headers, signal: AbortSignal.timeout(8000) })
+      : defaultIpv4Get(url, headers, 8000);
 
   async function refreshMtopCookie() {
     const t1 = Date.now();
@@ -40,10 +74,7 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
       dataType: 'json',
       data: dataStr
     });
-    const r1 = await fetchImpl(`${baseUrl}?${qs1}`, {
-      headers: reqHeaders,
-      signal: AbortSignal.timeout(10000)
-    });
+    const r1 = await doGet(`${baseUrl}?${qs1}`, reqHeaders);
     const setCookies = r1.headers?.getSetCookie
       ? r1.headers.getSetCookie()
       : (r1.headers?.get?.('set-cookie') ? [r1.headers.get('set-cookie')] : []);
@@ -51,17 +82,18 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
     const token = (cookiePair.match(/_m_h5_tk=([^_;]+)/) || [])[1] || '';
     if (!token) {
       const bodyPreview = await r1.text().catch(() => '');
-      throw new Error(`Taopiaopiao MTOP r1 HTTP ${r1.status} 未返回 _m_h5_tk (${bodyPreview.slice(0, 120)})`);
+      throw new Error(`${host} r1 HTTP ${r1.status} 未返回 _m_h5_tk (${bodyPreview.slice(0, 100)})`);
     }
     if (cookieState) {
+      cookieState.host = host;
       cookieState.cookiePair = cookiePair;
       cookieState.token = token;
     }
     return { cookiePair, token };
   }
 
-  let cookiePair = cookieState?.cookiePair || '';
-  let token = cookieState?.token || '';
+  let cookiePair = cookieState?.host === host ? (cookieState.cookiePair || '') : '';
+  let token = cookieState?.host === host ? (cookieState.token || '') : '';
   if (!token || !cookiePair) {
     ({ cookiePair, token } = await refreshMtopCookie());
   }
@@ -81,12 +113,9 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
       data: dataStr
     });
 
-    const r2 = await fetchImpl(`${baseUrl}?${qs2}`, {
-      headers: {
-        ...reqHeaders,
-        'Cookie': cookiePair
-      },
-      signal: AbortSignal.timeout(10000)
+    const r2 = await doGet(`${baseUrl}?${qs2}`, {
+      ...reqHeaders,
+      'Cookie': cookiePair
     });
 
     const rawText = await r2.text();
@@ -94,7 +123,7 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
     try {
       json = JSON.parse(rawText);
     } catch {
-      throw new Error(`Taopiaopiao MTOP HTTP ${r2.status} 非 JSON: ${rawText.slice(0, 140)}`);
+      throw new Error(`${host} HTTP ${r2.status} 非 JSON: ${rawText.slice(0, 120)}`);
     }
     const retStr = (json?.ret || []).join(',');
     if (/SUCCESS/i.test(retStr)) {
@@ -105,17 +134,34 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
       ({ cookiePair, token } = await refreshMtopCookie());
       continue;
     }
-    throw new Error(`Taopiaopiao MTOP HTTP ${r2.status} 返回异常: ${retStr || rawText.slice(0, 140)}`);
+    throw new Error(`${host} HTTP ${r2.status} 返回异常: ${retStr || rawText.slice(0, 120)}`);
   }
 
   return [];
 }
 
+async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchImpl = null } = {}) {
+  const hosts = cookieState?.host
+    ? [cookieState.host, ...TPP_HOSTS.filter((h) => h !== cookieState.host)]
+    : TPP_HOSTS;
+
+  const errs = [];
+  for (const host of hosts) {
+    try {
+      return await callMtopOnHost(host, api, v, dataObj, { cookieState, fetchImpl });
+    } catch (err) {
+      const code = err?.cause?.code || err?.code || '';
+      errs.push(`${host}: ${code || err?.message || err}`);
+    }
+  }
+  throw new Error(errs.join(' | '));
+}
+
 /**
  * Fetches hot + coming movies from Taopiaopiao and indexes them by normalized title.
  */
-export async function fetchTaopiaopiaoCatalog({ fetchImpl = fetch } = {}) {
-  const cookieState = { cookiePair: '', token: '' };
+export async function fetchTaopiaopiaoCatalog({ fetchImpl = null } = {}) {
+  const cookieState = { host: '', cookiePair: '', token: '' };
   const byNormTitle = new Map();
 
   const normalizeEntry = (item) => ({
