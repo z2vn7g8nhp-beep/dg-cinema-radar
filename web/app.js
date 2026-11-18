@@ -1801,9 +1801,9 @@ function renderDynamicsTab(root) {
                         </button>
                       </div>
                       <div style="margin-top:5px;font-size:13px;font-weight:600;color:var(--ink)">${escapeHtml(d.summary)}</div>
-                      <div class="row-between" style="margin-top:3px">
+                      <div class="row-between" style="margin-top:3px;align-items:baseline">
                         <span class="muted">${escapeHtml(d.detail || '')}</span>
-                        <span class="muted">${escapeHtml(formatRelTime(d.createdAt))}</span>
+                        <span class="muted" style="white-space:nowrap;flex-shrink:0">${escapeHtml(formatRelTime(d.createdAt))}</span>
                       </div>
                     </div>
                   </div>
