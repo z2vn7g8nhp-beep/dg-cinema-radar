@@ -7,9 +7,12 @@
  */
 
 import fs from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
-import { CINEMAS, getBeijingDateStr } from './lib/config.mjs';
+import { fileURLToPath } from 'node:url';
+import { CINEMAS, getBeijingDateStr, shiftDateStr } from './lib/config.mjs';
 import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
+import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
 import { enrichMovieIntel } from './lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from './lib/dynamics.mjs';
@@ -17,7 +20,7 @@ import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
 import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
-const CATALOG_REFRESH_INTERVAL_MIN = 15;
+const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
 
 async function readExistingPublicState() {
   try {
@@ -64,14 +67,25 @@ function collectCinemaMovieIds(cinemasObj = {}) {
   return ids;
 }
 
-function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchItems, nowIso, maxBudget }) {
+export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchItems, nowIso, todayStr = '', maxBudget = 16 }) {
   const starredIds = new Set(activeWatchItems.map((w) => Number(w.movieId)).filter(Boolean));
+  const windowStart = todayStr ? shiftDateStr(todayStr, -14) : '';
+  const windowEnd = todayStr ? shiftDateStr(todayStr, 14) : '';
   const candidates = [];
 
   for (const m of catalogMovies) {
     const prev = intelMap[String(m.id)];
-    const ageHours = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) / 60 : Infinity;
+    const ageMin = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) : Infinity;
     const isStarred = starredIds.has(Number(m.id));
+    const rt = String(m.rt || '').trim();
+    const isNearRelease = Boolean(
+      windowStart &&
+      windowEnd &&
+      /^\d{4}-\d{2}-\d{2}$/.test(rt) &&
+      rt >= windowStart &&
+      rt <= windowEnd
+    );
+    const isHotOrSoon = isStarred || m.source === 'onInfo' || isNearRelease;
     const missingAnyScore =
       !prev ||
       prev.doubanScore === null ||
@@ -79,11 +93,18 @@ function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchIt
       prev.rtCriticsScore === null ||
       !prev.enm;
 
-    if (!prev || (missingAnyScore && ageHours >= 4) || ageHours >= 24) {
+    const eligible =
+      !prev ||
+      (isHotOrSoon && ((missingAnyScore && ageMin >= 4.5) || ageMin >= 60)) ||
+      (!isHotOrSoon && ((missingAnyScore && ageMin >= 240) || ageMin >= 1440));
+
+    if (eligible) {
       const priorityScore =
         (isStarred ? 1_000_000 : 0) +
-        (!prev ? 100_000 : 0) +
+        (!prev ? 200_000 : 0) +
+        (isNearRelease ? 80_000 : 0) +
         (m.source === 'onInfo' ? 50_000 : 0) +
+        (missingAnyScore ? 20_000 : 0) +
         Math.min(40_000, Math.floor((m.wish || 0) / 10));
       candidates.push({ movie: m, priorityScore });
     }
@@ -351,13 +372,43 @@ async function main() {
       }
       nextIntelMap = prunedIntel;
 
-      // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within safe budget
-      const budget = mode === 'refresh_catalog' ? 10 : 6;
+      // Sync Taopiaopiao catalog once (2 requests -> all 100+ movies' wantCount, score & English title)
+      let tppCatalog = null;
+      try {
+        tppCatalog = await fetchTaopiaopiaoCatalog();
+      } catch (err) {
+        console.warn('Taopiaopiao catalog fetch warning:', err?.message || err);
+      }
+
+      const tppMatchedMap = new Map();
+      if (tppCatalog?.ok) {
+        for (const m of allEnriched) {
+          const matched = matchTaopiaopiaoMovie(m, tppCatalog);
+          if (matched) {
+            tppMatchedMap.set(Number(m.id), matched);
+            const k = String(m.id);
+            const curInt = nextIntelMap[k] || { movieId: Number(m.id) };
+            const tppEnm = matched.showNameEn && /[a-zA-Z]/.test(matched.showNameEn) ? matched.showNameEn : '';
+            nextIntelMap[k] = {
+              ...curInt,
+              movieId: Number(m.id),
+              enm: curInt.enm || tppEnm || '',
+              tppId: matched.tppId,
+              tppWish: matched.tppWish,
+              tppScore: matched.tppScore ?? curInt.tppScore ?? null
+            };
+          }
+        }
+      }
+
+      // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within 5-min cadence
+      const budget = mode === 'refresh_catalog' ? 20 : 16;
       const toEnrich = selectMoviesForIntelEnrichment({
         catalogMovies: allEnriched,
         intelMap: nextIntelMap,
         activeWatchItems,
         nowIso,
+        todayStr,
         maxBudget: budget
       });
 
@@ -365,7 +416,8 @@ async function main() {
         const key = String(targetMovie.id);
         nextIntelMap[key] = await enrichMovieIntel(targetMovie, nextIntelMap[key] || {}, {
           cookie,
-          omdbApiKey
+          omdbApiKey,
+          tppMatch: tppMatchedMap.get(Number(targetMovie.id)) || null
         });
       }
 
@@ -509,7 +561,12 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error('Fatal monitor error:', err);
-  process.exitCode = 1;
-});
+const isMain =
+  Boolean(process.argv[1]) &&
+  realpathSync(path.resolve(process.argv[1])) === realpathSync(path.resolve(fileURLToPath(import.meta.url)));
+if (isMain) {
+  main().catch((err) => {
+    console.error('Fatal monitor error:', err);
+    process.exitCode = 1;
+  });
+}

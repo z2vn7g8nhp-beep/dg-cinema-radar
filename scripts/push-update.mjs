@@ -30,6 +30,19 @@ async function main() {
     message: 'feat: expanded catalog, wish daily growth, all-movie dynamics & multi-platform scores'
   });
   console.log(`已成功更新 ${count} 个文件到 https://github.com/${owner}/${repoName} (Pages 将自动重新部署)`);
+
+  await fetch(`https://api.github.com/repos/${owner}/${repoName}/actions/workflows/monitor.yml/dispatches`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+      'User-Agent': 'dg-cinema-radar-updater'
+    },
+    body: JSON.stringify({ ref: 'main', inputs: { mode: 'refresh_catalog' } })
+  }).catch(() => undefined);
+  console.log('已顺带触发一次后台全量刷新 (refresh_catalog)，约 40 秒后可在手机端查看最新 5-Tab 界面与百余部新片片单！');
 }
 
 main().catch((err) => {

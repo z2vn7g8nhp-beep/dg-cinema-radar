@@ -113,15 +113,23 @@ export async function fetchImdbIntel({ enm = '', title = '', year = null, knownI
   let imdbId = knownId || '';
 
   if (!imdbId) {
-    const query = (enm || title || '').trim();
+    const query = ((/[a-zA-Z]/.test(enm) ? enm : '') || title || '').trim();
     if (!query) return null;
     const first = query[0].toLowerCase().replace(/[^a-z0-9]/g, 'x') || 'x';
-    const sug = await fetchJsonSafe(
-      `https://v2.sg.media-imdb.com/suggestion/${first}/${encodeURIComponent(query)}.json`,
-      {},
-      8000,
-      fetchImpl
-    );
+    let sug = null;
+    for (const host of ['v2.sg.media-imdb.com', 'v3.sg.media-imdb.com']) {
+      try {
+        sug = await fetchJsonSafe(
+          `https://${host}/suggestion/${first}/${encodeURIComponent(query)}.json`,
+          {},
+          8000,
+          fetchImpl
+        );
+        if (sug?.d) break;
+      } catch {
+        // try next IMDb suggestion host
+      }
+    }
     const candidates = (sug?.d || []).filter((x) => x.id?.startsWith('tt') && (!x.qid || x.qid === 'movie'));
     let best = null;
     let bestScore = -999;
@@ -287,10 +295,11 @@ export async function fetchRottenTomatoesIntel({ enm = '', title = '', year = nu
  * Enriches one movie with Maoyan detail (`enm`, `sc`, `cat`, `dur`, `pubDesc`) plus Douban, IMDb, and RT scores.
  * Each external call is isolated so one platform failing never breaks the others.
  */
-export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omdbApiKey = '', fetchImpl = fetch } = {}) {
+export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omdbApiKey = '', tppMatch = null, fetchImpl = fetch } = {}) {
+  const tppEnm = tppMatch?.showNameEn && /[a-zA-Z]/.test(tppMatch.showNameEn) ? tppMatch.showNameEn : '';
   const next = {
     movieId: Number(movie.id),
-    enm: prevIntel.enm || '',
+    enm: prevIntel.enm || tppEnm || '',
     cat: prevIntel.cat || '',
     dur: prevIntel.dur || 0,
     dir: prevIntel.dir || '',
@@ -308,11 +317,13 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     rtUrl: prevIntel.rtUrl || '',
     rtCriticsScore: prevIntel.rtCriticsScore ?? null,
     rtAudienceScore: prevIntel.rtAudienceScore ?? null,
-    tppWish: prevIntel.tppWish ?? null,
+    tppId: tppMatch?.tppId || prevIntel.tppId || null,
+    tppWish: tppMatch?.tppWish ?? prevIntel.tppWish ?? null,
+    tppScore: tppMatch?.tppScore ?? prevIntel.tppScore ?? null,
     checkedAt: new Date().toISOString()
   };
 
-  if (!next.enm || !next.pubDesc || !next.maoyanScore) {
+  if (!next.pubDesc) {
     try {
       const dm = await fetchMaoyanMovieDetail(movie.id, { cookie, fetchImpl });
       if (dm.ok && dm.data) {

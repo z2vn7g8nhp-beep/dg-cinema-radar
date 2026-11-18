@@ -11,6 +11,8 @@ import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
 import { parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
+import { buildMtopSign, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
+import { selectMoviesForIntelEnrichment } from '../monitor.mjs';
 import sodium from 'libsodium-wrappers';
 import webpush from 'web-push';
 
@@ -472,4 +474,53 @@ test('detectDynamicEvents catches 定档, 改档, 开票, and 开分 across Maoy
   assert.ok(alertStarOnly);
   assert.match(alertStarOnly.body, /调档大片/);
   assert.doesNotMatch(alertStarOnly.body, /待定新片/);
+});
+
+test('taopiaopiao MTOP sign and fuzzy title matcher work cleanly', () => {
+  const sig = buildMtopSign('abc123', 1700000000000, '12574478', '{"citycode":"441900"}');
+  assert.match(sig, /^[a-f0-9]{32}$/);
+
+  const catalog = {
+    ok: true,
+    byNormTitle: new Map([
+      ['神探之痕迹', { tppId: 1557745, showName: '神探之痕迹', tppWish: 181091, tppScore: 9.5 }],
+      ['饥饿游戏收获日出', { tppId: 1529356, showName: '饥饿游戏：收获日出', showNameEn: 'The Hunger Games: Sunrise on the Reaping', tppWish: 24487, tppScore: null }]
+    ])
+  };
+
+  const m1 = matchTaopiaopiaoMovie({ nm: '神探之痕迹' }, catalog);
+  assert.equal(m1.tppWish, 181091);
+  assert.equal(m1.tppScore, 9.5);
+
+  const m2 = matchTaopiaopiaoMovie({ nm: '饥饿游戏：收获日出' }, catalog);
+  assert.equal(m2.tppWish, 24487);
+  assert.equal(m2.showNameEn, 'The Hunger Games: Sunrise on the Reaping');
+});
+
+test('selectMoviesForIntelEnrichment refreshes starred/onInfo/near-release movies on 5-min cadence', () => {
+  const nowIso = '2026-11-18T12:00:00Z';
+  const checked5MinAgo = '2026-11-18T11:55:00Z';
+  const checked1MinAgo = '2026-11-18T11:59:00Z';
+
+  const selected = selectMoviesForIntelEnrichment({
+    catalogMovies: [
+      { id: 1, nm: '刚热映未开分', source: 'onInfo', rt: '2026-11-18', wish: 50000 },
+      { id: 2, nm: '即将上映缺失', source: 'coming', rt: '2026-11-20', wish: 40000 },
+      { id: 3, nm: '一分钟前刚查', source: 'coming', rt: '2026-11-20', wish: 60000 },
+      { id: 4, nm: '明年远期片', source: 'coming', rt: '2027-05-01', wish: 80000 }
+    ],
+    intelMap: {
+      '1': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'A', checkedAt: checked5MinAgo },
+      '2': { doubanScore: null, imdbScore: null, rtCriticsScore: 75, enm: 'B', checkedAt: checked5MinAgo },
+      '3': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'C', checkedAt: checked1MinAgo },
+      '4': { doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'D', checkedAt: checked5MinAgo }
+    },
+    activeWatchItems: [],
+    nowIso,
+    todayStr: '2026-11-18',
+    maxBudget: 10
+  });
+
+  const ids = selected.map((m) => m.id);
+  assert.deepEqual(ids, [1, 2]);
 });

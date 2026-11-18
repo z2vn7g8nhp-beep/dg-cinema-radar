@@ -218,12 +218,12 @@ function openMovieDetailModal({ movieId = null, title = '', poster = '' }) {
           <div class="metric-sub">${wishYesterdayGain > 0 ? `昨日增长 +${wishYesterdayGain.toLocaleString('zh-CN')}` : '以猫眼实时想看为准'}</div>
         </div>
         <div class="metric-box">
-          <div class="metric-label"><span>🎫 淘票票想看</span></div>
+          <div class="metric-label"><span>🎫 淘票票想看</span>${intel.tppScore ? `<span style="color:var(--cyan)">${intel.tppScore}分</span>` : ''}</div>
           <div class="metric-val" style="font-size:${intel.tppWish ? '18px' : '13px'};color:${intel.tppWish ? 'var(--cyan)' : 'var(--text-dim)'}">
-            ${intel.tppWish ? formatWishCount(intel.tppWish) : '受阿里MTOP风控限制'}
+            ${intel.tppWish ? formatWishCount(intel.tppWish) : '暂未匹配到条目'}
           </div>
           <div class="metric-sub">
-            <a href="https://m.taopiaopiao.com/" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">打开淘票票手动查看 →</a>
+            <a href="https://m.taopiaopiao.com/" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">去淘票票查看 →</a>
           </div>
         </div>
       </div>
@@ -1270,7 +1270,7 @@ function renderDynamicsTab(root) {
       <div class="row-between" style="margin-bottom:8px">
         <div>
           <div class="card-title">🔥 新片全网动态（定档 / 开票 / 改档 / 开分）</div>
-          <div class="muted">每 15 分钟自动巡检全量新片与豆瓣/IMDb/烂番茄开分 · 上次同步 ${escapeHtml(lastCatSync)}</div>
+          <div class="muted">每 5 分钟自动巡检全量新片（猫眼/淘票票/豆瓣/IMDb/烂番茄） · 上次同步 ${escapeHtml(lastCatSync)}</div>
         </div>
         <button class="btn btn-primary btn-sm" id="dynSyncBtn" type="button">立即全量刷新</button>
       </div>
@@ -1385,7 +1385,7 @@ function renderCatalogTab(root) {
   root.innerHTML = `
     <div class="card">
       <div class="row-between" style="margin-bottom:8px">
-        <div class="muted">全量片单共 ${comingList.length + onInfoList.length} 部（每15分钟自动更新；点片名看四平台评分与淘票票对比）</div>
+        <div class="muted">全量片单共 ${comingList.length + onInfoList.length} 部（每5分钟自动更新；点片名看猫眼/淘票票想看与四平台评分）</div>
         <button class="btn btn-sm" id="syncCatalogBtn" type="button">刷新片单</button>
       </div>
       <div class="pill-group" style="margin-bottom:10px">
@@ -1437,7 +1437,8 @@ function renderCatalogTab(root) {
                       <div class="row" style="margin:5px 0">
                         <span class="badge badge-normal">${escapeHtml(m.statusLabel || '')}</span>
                         ${hasImax ? `<span class="badge badge-imax">IMAX</span>` : ''}
-                        <span class="badge badge-gt">想看 ${formatWishCount(m.wish)}</span>
+                        <span class="badge badge-gt">猫眼想看 ${formatWishCount(m.wish)}</span>
+                        ${intel.tppWish > 0 ? `<span class="badge badge-imax">淘票票 ${formatWishCount(intel.tppWish)}</span>` : ''}
                         ${Number(m.wishDailyGain || 0) > 0 ? `<span class="badge dyn-presale_opened">今日 +${Number(m.wishDailyGain).toLocaleString('zh-CN')}</span>` : ''}
                         ${m.rt ? `<span class="muted">${escapeHtml(m.rt)}</span>` : ''}
                       </div>
@@ -1577,7 +1578,7 @@ function renderSettingsTab(root) {
       <div class="card-header">
         <div>
           <div class="card-title">3. 猫眼抓取频率、风控与动态推送范围</div>
-          <div class="muted">盯票场次：随 cron-job.org 每 1~2 分钟抓 3 家影院（无星标自动降频）；全量片单/想看/豆瓣/IMDb/烂番茄开分：每 15 分钟自动更新</div>
+          <div class="muted">盯票场次：随 cron-job.org 每 1~2 分钟抓 3 家影院（无星标自动降频）；全量片单/猫眼+淘票票想看/豆瓣+IMDb+烂番茄开分：每 5 分钟自动更新</div>
         </div>
       </div>
       <div class="field">
@@ -1915,8 +1916,23 @@ function render({ preserveFocusedSettings = false } = {}) {
 async function initServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    const reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    let refreshing = false;
+    if (hadController) {
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+      });
+    }
+    const reg = await navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' });
     appState.swReg = reg;
+    reg.update().catch(() => undefined);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        reg.update().catch(() => undefined);
+      }
+    });
     if ('pushManager' in reg) {
       appState.pushSub = await reg.pushManager.getSubscription();
     }
