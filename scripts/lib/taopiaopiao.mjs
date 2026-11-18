@@ -19,11 +19,15 @@ export function buildMtopSign(token, t, appKey, dataStr) {
 async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchImpl = fetch } = {}) {
   const dataStr = JSON.stringify(dataObj);
   const baseUrl = `https://acs.m.taopiaopiao.com/h5/${api}/${v}/`;
+  const reqHeaders = {
+    'User-Agent': TPP_UA,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Origin': 'https://m.taopiaopiao.com',
+    'Referer': 'https://m.taopiaopiao.com/'
+  };
 
-  let cookiePair = cookieState?.cookiePair || '';
-  let token = cookieState?.token || '';
-
-  if (!token || !cookiePair) {
+  async function refreshMtopCookie() {
     const t1 = Date.now();
     const qs1 = new URLSearchParams({
       jsv: '2.7.2',
@@ -37,51 +41,74 @@ async function callTaopiaopiaoMtop(api, v, dataObj, { cookieState = null, fetchI
       data: dataStr
     });
     const r1 = await fetchImpl(`${baseUrl}?${qs1}`, {
-      headers: { 'User-Agent': TPP_UA, 'Referer': 'https://m.taopiaopiao.com/' },
+      headers: reqHeaders,
       signal: AbortSignal.timeout(10000)
     });
-    const setCookies = r1.headers?.getSetCookie ? r1.headers.getSetCookie() : [];
-    cookiePair = setCookies.map((c) => c.split(';')[0]).join('; ');
-    token = (cookiePair.match(/_m_h5_tk=([^_;]+)/) || [])[1] || '';
+    const setCookies = r1.headers?.getSetCookie
+      ? r1.headers.getSetCookie()
+      : (r1.headers?.get?.('set-cookie') ? [r1.headers.get('set-cookie')] : []);
+    const cookiePair = setCookies.map((c) => c.split(';')[0]).join('; ');
+    const token = (cookiePair.match(/_m_h5_tk=([^_;]+)/) || [])[1] || '';
     if (!token) {
-      throw new Error('Taopiaopiao MTOP 未返回 _m_h5_tk');
+      const bodyPreview = await r1.text().catch(() => '');
+      throw new Error(`Taopiaopiao MTOP r1 HTTP ${r1.status} 未返回 _m_h5_tk (${bodyPreview.slice(0, 120)})`);
     }
     if (cookieState) {
       cookieState.cookiePair = cookiePair;
       cookieState.token = token;
     }
+    return { cookiePair, token };
   }
 
-  const t2 = Date.now();
-  const sign = buildMtopSign(token, t2, TPP_APP_KEY, dataStr);
-  const qs2 = new URLSearchParams({
-    jsv: '2.7.2',
-    appKey: TPP_APP_KEY,
-    t: String(t2),
-    sign,
-    api,
-    v,
-    type: 'originaljson',
-    dataType: 'json',
-    data: dataStr
-  });
-
-  const r2 = await fetchImpl(`${baseUrl}?${qs2}`, {
-    headers: {
-      'User-Agent': TPP_UA,
-      'Referer': 'https://m.taopiaopiao.com/',
-      'Cookie': cookiePair
-    },
-    signal: AbortSignal.timeout(10000)
-  });
-
-  const json = await r2.json();
-  const retStr = (json?.ret || []).join(',');
-  if (!/SUCCESS/i.test(retStr)) {
-    throw new Error(`Taopiaopiao MTOP 返回异常: ${retStr || r2.status}`);
+  let cookiePair = cookieState?.cookiePair || '';
+  let token = cookieState?.token || '';
+  if (!token || !cookiePair) {
+    ({ cookiePair, token } = await refreshMtopCookie());
   }
-  const rv = json?.data?.returnValue;
-  return Array.isArray(rv) ? rv : [];
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const t2 = Date.now();
+    const sign = buildMtopSign(token, t2, TPP_APP_KEY, dataStr);
+    const qs2 = new URLSearchParams({
+      jsv: '2.7.2',
+      appKey: TPP_APP_KEY,
+      t: String(t2),
+      sign,
+      api,
+      v,
+      type: 'originaljson',
+      dataType: 'json',
+      data: dataStr
+    });
+
+    const r2 = await fetchImpl(`${baseUrl}?${qs2}`, {
+      headers: {
+        ...reqHeaders,
+        'Cookie': cookiePair
+      },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    const rawText = await r2.text();
+    let json = null;
+    try {
+      json = JSON.parse(rawText);
+    } catch {
+      throw new Error(`Taopiaopiao MTOP HTTP ${r2.status} 非 JSON: ${rawText.slice(0, 140)}`);
+    }
+    const retStr = (json?.ret || []).join(',');
+    if (/SUCCESS/i.test(retStr)) {
+      const rv = json?.data?.returnValue;
+      return Array.isArray(rv) ? rv : [];
+    }
+    if (attempt === 0 && /TOKEN_EXPIRED|TOKEN_EMPTY|ILLEGAL_ACCESS/i.test(retStr)) {
+      ({ cookiePair, token } = await refreshMtopCookie());
+      continue;
+    }
+    throw new Error(`Taopiaopiao MTOP HTTP ${r2.status} 返回异常: ${retStr || rawText.slice(0, 140)}`);
+  }
+
+  return [];
 }
 
 /**
@@ -100,20 +127,25 @@ export async function fetchTaopiaopiaoCatalog({ fetchImpl = fetch } = {}) {
     openTime: item.openTime || ''
   });
 
-  const [hot, soon] = await Promise.all([
-    callTaopiaopiaoMtop(
-      'mtop.film.mtopshowapi.getshowsbycitycode',
-      '4.0',
-      { citycode: TPP_CITY_CODE, platform: '8', pageIndex: 1, pageSize: 100 },
-      { cookieState, fetchImpl }
-    ).catch(() => []),
-    callTaopiaopiaoMtop(
-      'mtop.film.mtopshowapi.getsoonshowsbycitycode',
-      '5.0',
-      { citycode: TPP_CITY_CODE, platform: '8', pageIndex: 1, pageSize: 100 },
-      { cookieState, fetchImpl }
-    ).catch(() => [])
-  ]);
+  const hot = await callTaopiaopiaoMtop(
+    'mtop.film.mtopshowapi.getshowsbycitycode',
+    '4.0',
+    { citycode: TPP_CITY_CODE, platform: '8', pageIndex: 1, pageSize: 100 },
+    { cookieState, fetchImpl }
+  ).catch((err) => {
+    console.warn('Taopiaopiao hot fetch failed:', err?.message || err);
+    return [];
+  });
+
+  const soon = await callTaopiaopiaoMtop(
+    'mtop.film.mtopshowapi.getsoonshowsbycitycode',
+    '5.0',
+    { citycode: TPP_CITY_CODE, platform: '8', pageIndex: 1, pageSize: 100 },
+    { cookieState, fetchImpl }
+  ).catch((err) => {
+    console.warn('Taopiaopiao soon fetch failed:', err?.message || err);
+    return [];
+  });
 
   for (const raw of [...hot, ...soon]) {
     const entry = normalizeEntry(raw);
