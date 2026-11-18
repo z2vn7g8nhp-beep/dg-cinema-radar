@@ -74,6 +74,26 @@ function isOldMovieBeyondWindow(rt, todayStr) {
 }
 
 /**
+ * Only emit "开分" when a fresh/upcoming release newly receives a score —
+ * never for >14d historical backfill, classic re-releases, or intel matchVersion upgrades.
+ */
+function isEligibleForScoreOpening(curr, currRt, prevInt, currInt, todayStr) {
+  if (isOldMovieBeyondWindow(currRt, todayStr)) return false;
+  if (/重映|4k/i.test(String(curr?.nm || ''))) return false;
+
+  const curYear = Number(String(todayStr || '').slice(0, 4)) || new Date().getFullYear();
+  const doubanYear = Number(currInt?.doubanYear || 0);
+  const imdbYear = Number(currInt?.imdbYear || 0);
+  if (doubanYear > 0 && doubanYear < curYear - 1) return false;
+  if (imdbYear > 0 && imdbYear < curYear - 1) return false;
+
+  if (prevInt?.matchVersion && currInt?.matchVersion && prevInt.matchVersion !== currInt.matchVersion) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Detects 定档 / 改档 / 开票 / 开分 events across all movies in the catalog & intel cache.
  */
 export function detectDynamicEvents({
@@ -176,27 +196,28 @@ export function detectDynamicEvents({
       });
     }
 
-    // 4. 开分 (scored across 猫眼 / 豆瓣 / IMDb / 烂番茄)
+    // 4. 开分 (scored across 猫眼 / 豆瓣 / IMDb / 烂番茄 — strictly fresh/upcoming transitions after baseline, never backfill)
     const prevInt = prevIntelMap[key] || {};
     const currInt = currIntelMap[key] || {};
-    const isFreshRelease = !isOldMovieBeyondWindow(currRt, todayStr);
+    const canEmitScore = isEligibleForScoreOpening(curr, currRt, prevInt, currInt, todayStr);
+    const hadIntelBefore = Boolean(prevIntelMap[key]);
     const openedScores = [];
 
     const prevMaoyan = Number(prev?.sc || prevInt.maoyanScore || 0);
     const currMaoyan = Number(curr.sc || currInt.maoyanScore || 0);
-    if (prev && prevMaoyan <= 0 && currMaoyan > 0) {
+    if (canEmitScore && prev && prevMaoyan <= 0 && currMaoyan > 0) {
       openedScores.push(`猫眼 ${currMaoyan}`);
     }
 
-    const hadIntelBefore = Boolean(prevIntelMap[key]);
-    if ((hadIntelBefore || isFreshRelease) && !(prevInt.doubanScore > 0) && currInt.doubanScore > 0) {
+    if (canEmitScore && hadIntelBefore && !(prevInt.doubanScore > 0) && currInt.doubanScore > 0) {
       openedScores.push(`豆瓣 ${currInt.doubanScore}`);
     }
-    if ((hadIntelBefore || isFreshRelease) && !(prevInt.imdbScore > 0) && currInt.imdbScore > 0) {
+    if (canEmitScore && hadIntelBefore && !(prevInt.imdbScore > 0) && currInt.imdbScore > 0) {
       openedScores.push(`IMDb ${currInt.imdbScore}`);
     }
     if (
-      (hadIntelBefore || isFreshRelease) &&
+      canEmitScore &&
+      hadIntelBefore &&
       (prevInt.rtCriticsScore === null || prevInt.rtCriticsScore === undefined) &&
       currInt.rtCriticsScore !== null &&
       currInt.rtCriticsScore !== undefined

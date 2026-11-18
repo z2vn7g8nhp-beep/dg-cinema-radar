@@ -21,6 +21,14 @@ import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
 const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
+export const DYNAMICS_EPOCH_VERSION = 2;
+
+export function resolveBaselineDynamics(prevPublic) {
+  if (Number(prevPublic?.dynamicsVersion || 1) < DYNAMICS_EPOCH_VERSION) {
+    return [];
+  }
+  return Array.isArray(prevPublic?.dynamics) ? prevPublic.dynamics : [];
+}
 
 async function readExistingPublicState() {
   try {
@@ -188,7 +196,7 @@ async function main() {
     tickCounter: 0
   };
   const alertsHistory = privateState?.alerts || prevPublic.alerts || [];
-  const prevDynamics = Array.isArray(prevPublic.dynamics) ? prevPublic.dynamics : [];
+  const prevDynamics = resolveBaselineDynamics(prevPublic);
   const prevIntelMap = prevPublic.intel || {};
 
   const activeWatchItems = watchlist.filter((w) => w && w.active !== false);
@@ -221,6 +229,8 @@ async function main() {
     console.log(`Risk-control cooldown active until ${runtime.cooldownUntil}; skipping Maoyan requests.`);
     await writePublicState({
       ...prevPublic,
+      dynamicsVersion: DYNAMICS_EPOCH_VERSION,
+      dynamics: prevDynamics,
       lastTickAt: nowIso,
       vapidPublicKey,
       status: 'cooldown',
@@ -254,6 +264,8 @@ async function main() {
     console.log('Monitoring paused by user settings; skipping Maoyan requests.');
     await writePublicState({
       ...prevPublic,
+      dynamicsVersion: DYNAMICS_EPOCH_VERSION,
+      dynamics: prevDynamics,
       lastTickAt: nowIso,
       vapidPublicKey,
       status: 'paused',
@@ -267,6 +279,8 @@ async function main() {
     console.log(`Idle mode (0 active stars, catalog age ${catalogAgeMin.toFixed(1)}m < ${CATALOG_REFRESH_INTERVAL_MIN}m); 0 Maoyan requests made.`);
     await writePublicState({
       ...prevPublic,
+      dynamicsVersion: DYNAMICS_EPOCH_VERSION,
+      dynamics: prevDynamics,
       lastTickAt: nowIso,
       vapidPublicKey,
       status: 'idle',
@@ -334,6 +348,8 @@ async function main() {
 
     await writePublicState({
       ...prevPublic,
+      dynamicsVersion: DYNAMICS_EPOCH_VERSION,
+      dynamics: prevDynamics,
       lastTickAt: nowIso,
       vapidPublicKey,
       status: 'cooldown',
@@ -514,10 +530,10 @@ async function main() {
       });
 
       if (newDynamicEvents.length > 0) {
-        const existingDynIds = new Set(prevDynamics.map((d) => d.id));
+        const existingDynIds = new Set(nextDynamics.map((d) => d.id));
         const uniqueNewEvents = newDynamicEvents.filter((e) => !existingDynIds.has(e.id));
         if (uniqueNewEvents.length > 0) {
-          nextDynamics = [...uniqueNewEvents, ...prevDynamics].slice(0, 60);
+          nextDynamics = [...uniqueNewEvents, ...nextDynamics].slice(0, 60);
           if (privateState) {
             const dynAlert = buildDynamicsAlert({
               events: uniqueNewEvents,
@@ -617,6 +633,7 @@ async function main() {
     lastTickAt: nowIso,
     lastCatalogSyncAt: lastCatalogSyncAt || nowIso,
     catalogBaselineReady,
+    dynamicsVersion: DYNAMICS_EPOCH_VERSION,
     vapidPublicKey,
     status: activeWatchItems.length > 0 ? 'watching' : 'idle',
     activeWatchCount: activeWatchItems.length,

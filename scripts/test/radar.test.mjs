@@ -12,7 +12,7 @@ import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mj
 import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, looksLikeMandarinPinyinOf, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
 import { buildMtopSign, fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
-import { selectMoviesForIntelEnrichment } from '../monitor.mjs';
+import { DYNAMICS_EPOCH_VERSION, resolveBaselineDynamics, selectMoviesForIntelEnrichment } from '../monitor.mjs';
 import sodium from 'libsodium-wrappers';
 import webpush from 'web-push';
 
@@ -670,4 +670,66 @@ test('taopiaopiao catalog paginates soon shows page 2 when page 1 hits 100 items
   });
   const openEv = dyn.find((e) => e.type === 'presale_opened');
   assert.equal(openEv.detail, '华南MALL IMAX GT 2场 · 民盈国贸城 CGV 1场');
+});
+
+test('detectDynamicEvents ignores historical backfill, re-releases, first-time intel, and matchVersion upgrades while allowing genuine new score openings', () => {
+  const dyn = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T15:00:00Z',
+    prevCatalogMap: {
+      '101': { id: 101, nm: '老片回填', rt: '2026-10-01', statusLabel: '热映', sc: 0 },
+      '102': { id: 102, nm: '沙丘重映版', rt: '2026-11-20', statusLabel: '预售', sc: 0 },
+      '103': { id: 103, nm: '疾速追杀', rt: '2026-11-20', statusLabel: '热映', sc: 0 },
+      '104': { id: 104, nm: '版本升级电影', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
+      '105': { id: 105, nm: '首次入库片', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
+      '106': { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '预售', sc: 0 }
+    },
+    currMovies: [
+      { id: 101, nm: '老片回填', rt: '2026-10-01', statusLabel: '热映', sc: 8.8 },
+      { id: 102, nm: '沙丘重映版', rt: '2026-11-20', statusLabel: '购票', sc: 0 },
+      { id: 103, nm: '疾速追杀', rt: '2026-11-20', statusLabel: '热映', sc: 0 },
+      { id: 104, nm: '版本升级电影', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
+      { id: 105, nm: '首次入库片', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
+      { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '购票', sc: 0 }
+    ],
+    prevIntelMap: {
+      '101': { matchVersion: 3, doubanScore: null },
+      '102': { matchVersion: 3, doubanScore: null },
+      '103': { matchVersion: 3, doubanScore: null },
+      '104': { matchVersion: 1, doubanScore: null },
+      '106': { matchVersion: 3, doubanYear: 2025, doubanScore: null, imdbScore: null }
+    },
+    currIntelMap: {
+      '101': { matchVersion: 3, doubanScore: 7.9, imdbScore: 7.6 },
+      '102': { matchVersion: 3, doubanScore: 7.7 },
+      '103': { matchVersion: 3, doubanYear: 2014, doubanScore: 7.8, imdbScore: 7.5 },
+      '104': { matchVersion: 3, doubanScore: 7.4, rtCriticsScore: 80 },
+      '105': { matchVersion: 3, doubanScore: 8.1, imdbScore: 7.8 },
+      '106': { matchVersion: 3, doubanYear: 2025, doubanScore: 7.3, imdbScore: 7.1 }
+    },
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set()
+  });
+
+  const scored = dyn.filter((e) => e.type === 'scored');
+  assert.equal(scored.length, 1);
+  assert.equal(scored[0].movieId, 106);
+  assert.match(scored[0].summary, /豆瓣 7\.3/);
+  assert.match(scored[0].summary, /IMDb 7\.1/);
+});
+
+test('resolveBaselineDynamics resets legacy dynamics before DYNAMICS_EPOCH_VERSION and preserves current epoch dynamics', () => {
+  assert.deepEqual(
+    resolveBaselineDynamics({ dynamics: [{ id: 'old1' }] }),
+    []
+  );
+  assert.deepEqual(
+    resolveBaselineDynamics({ dynamicsVersion: 1, dynamics: [{ id: 'old1' }] }),
+    []
+  );
+  assert.deepEqual(
+    resolveBaselineDynamics({ dynamicsVersion: DYNAMICS_EPOCH_VERSION, dynamics: [{ id: 'fresh1' }] }),
+    [{ id: 'fresh1' }]
+  );
 });
