@@ -9,6 +9,8 @@ import {
 } from '../lib/radar.mjs';
 import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
+import { parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
+import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
 import sodium from 'libsodium-wrappers';
 import webpush from 'web-push';
 
@@ -385,6 +387,89 @@ test('bootstrapGitHubProject creates repo, pushes tree, enables pages, creates g
   assert.equal(uploadedSecrets.RADAR_GIST_ID, 'gist123456');
   assert.equal(uploadedSecrets.RADAR_GH_TOKEN, 'ghp_dummy');
   assert.ok(uploadedSecrets.VAPID_PUBLIC_KEY.length > 20);
-  assert.ok(uploadedSecrets.VAPID_PRIVATE_KEY.length > 20);
+  assert.equal(uploadedSecrets.VAPID_PRIVATE_KEY.length > 20, true);
   assert.ok(res.pairUrl.includes('#pair='));
+});
+
+test('intel parsers extract RT Tomatometer and Popcornmeter and score year/title accurately', () => {
+  const rows = parseRottenTomatoesSearchRows(`
+    <search-page-media-row release-year="2024" tomatometer-score="92">
+      <a href="https://www.rottentomatoes.com/m/dune_part_two" slot="title">Dune: Part Two</a>
+    </search-page-media-row>
+  `);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].criticsScore, 92);
+  assert.equal(rows[0].year, 2024);
+
+  const detail = parseRottenTomatoesDetailJson(
+    '"criticsScore":{"scorePercent":"92%"},"audienceScore":{"scorePercent":"95%"}'
+  );
+  assert.deepEqual(detail, { criticsScore: 92, audienceScore: 95 });
+
+  const sExact = scoreTitleCandidate({ candTitle: 'Dune: Part Two', candYear: 2024 }, { enm: 'Dune: Part Two', year: 2024 });
+  const sWrong = scoreTitleCandidate({ candTitle: 'Dune', candYear: 1984 }, { enm: 'Dune: Part Two', year: 2024 });
+  assert.ok(sExact > sWrong);
+});
+
+test('wish snapshots track daily growth and roll over across Beijing days', () => {
+  const snap1 = updateWishSnapshots({}, [{ id: 1, wish: 1000 }, { id: 2, wish: 500 }], '2026-11-18');
+  const snap2 = updateWishSnapshots(snap1, [{ id: 1, wish: 1350 }, { id: 2, wish: 520 }], '2026-11-18');
+  const withGain = attachWishGrowth([{ id: 1, wish: 1350 }], snap2);
+  assert.equal(withGain[0].wishDailyGain, 350);
+
+  const snapNextDay = updateWishSnapshots(snap2, [{ id: 1, wish: 1410 }], '2026-11-19');
+  const nextGain = attachWishGrowth([{ id: 1, wish: 1410 }], snapNextDay);
+  assert.equal(nextGain[0].wishDailyGain, 60);
+  assert.equal(nextGain[0].wishYesterdayGain, 350);
+});
+
+test('detectDynamicEvents catches 定档, 改档, 开票, and 开分 across Maoyan/Douban/IMDb/RT', () => {
+  const events = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-18',
+    nowIso: '2026-11-18T11:00:00Z',
+    prevCatalogMap: {
+      '10': { id: 10, nm: '待定新片', rt: '', statusLabel: '想看', sc: 0 },
+      '20': { id: 20, nm: '调档大片', rt: '2026-12-01', statusLabel: '想看', sc: 0 },
+      '30': { id: 30, nm: '开分大片', rt: '2026-11-18', statusLabel: '预售', sc: 0 }
+    },
+    currMovies: [
+      { id: 10, nm: '待定新片', rt: '2026-12-20', statusLabel: '想看', sc: 0 },
+      { id: 20, nm: '调档大片', rt: '2026-12-18', statusLabel: '预售', sc: 0 },
+      { id: 30, nm: '开分大片', rt: '2026-11-18', statusLabel: '购票', sc: 9.2 }
+    ],
+    prevIntelMap: {
+      '30': { doubanScore: null, imdbScore: null, rtCriticsScore: null }
+    },
+    currIntelMap: {
+      '30': { doubanScore: 8.3, imdbScore: 8.1, rtCriticsScore: 91 }
+    },
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set([20])
+  });
+
+  const types = events.map((e) => e.type);
+  assert.ok(types.includes('scheduled'));
+  assert.ok(types.includes('rescheduled'));
+  assert.ok(types.includes('presale_opened'));
+  assert.ok(types.includes('scored'));
+
+  const scoreEv = events.find((e) => e.type === 'scored');
+  assert.match(scoreEv.summary, /猫眼 9.2/);
+  assert.match(scoreEv.summary, /豆瓣 8.3/);
+  assert.match(scoreEv.summary, /IMDb 8.1/);
+  assert.match(scoreEv.summary, /烂番茄 91%/);
+
+  const alertAll = buildDynamicsAlert({ events, watchlist: [], notifyAllDynamics: true });
+  assert.ok(alertAll);
+  assert.match(alertAll.title, /新片动态/);
+
+  const alertStarOnly = buildDynamicsAlert({
+    events,
+    watchlist: [{ id: 'w1', movieId: 20, active: true }],
+    notifyAllDynamics: false
+  });
+  assert.ok(alertStarOnly);
+  assert.match(alertStarOnly.body, /调档大片/);
+  assert.doesNotMatch(alertStarOnly.body, /待定新片/);
 });

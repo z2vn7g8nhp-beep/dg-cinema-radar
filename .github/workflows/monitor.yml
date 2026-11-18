@@ -59,6 +59,7 @@ jobs:
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
           MAOYAN_COOKIE: ${{ secrets.MAOYAN_COOKIE }}
+          OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
           PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: node scripts/monitor.mjs
 

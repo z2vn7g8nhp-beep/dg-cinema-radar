@@ -1,6 +1,8 @@
 {
   "updatedAt": "",
   "lastTickAt": "",
+  "lastCatalogSyncAt": "",
+  "catalogBaselineReady": false,
   "vapidPublicKey": "",
   "status": "uninitialized",
   "activeWatchCount": 0,
@@ -16,5 +18,8 @@
     "onInfo": [],
     "coming": []
   },
+  "wishSnapshots": {},
+  "intel": {},
+  "dynamics": [],
   "alerts": []
 }

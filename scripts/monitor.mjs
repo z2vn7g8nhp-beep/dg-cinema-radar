@@ -1,8 +1,9 @@
 /**
  * Main GitHub Actions runner for Dongguan Cinema Radar.
- * Reads private config from Gist, applies anti-risk-control pacing & circuit breaker,
- * diffs multi-round showtimes, dispatches 1 consolidated notification per wave,
- * and writes non-sensitive public snapshot `state.json` for the GitHub Pages Web App.
+ * - Every tick (1-2 min via cron-job.org): checks 3 Dongguan cinemas when starred movies exist.
+ * - Every 15 min (or refresh_catalog): syncs expanded Maoyan catalog (~100+ movies),
+ *   tracks daily Maoyan wish growth, enriches Douban/IMDb/Rotten Tomatoes scores,
+ *   and pushes consolidated dynamic alerts (定档/开票/改档/开分).
  */
 
 import fs from 'node:fs/promises';
@@ -10,10 +11,13 @@ import path from 'node:path';
 import { CINEMAS, getBeijingDateStr } from './lib/config.mjs';
 import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
+import { enrichMovieIntel } from './lib/intel.mjs';
+import { attachWishGrowth, buildDynamicsAlert, detectDynamicEvents, updateWishSnapshots } from './lib/dynamics.mjs';
 import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
 import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
+const CATALOG_REFRESH_INTERVAL_MIN = 15;
 
 async function readExistingPublicState() {
   try {
@@ -49,6 +53,46 @@ function minutesBetween(isoA, isoB) {
   return (new Date(isoB).getTime() - new Date(isoA).getTime()) / 60000;
 }
 
+function collectCinemaMovieIds(cinemasObj = {}) {
+  const ids = new Set();
+  for (const c of Object.values(cinemasObj)) {
+    for (const m of c?.movies || []) {
+      const hasAlertable = (m.shows || []).some((s) => s.alertable);
+      if (hasAlertable && m.id) ids.add(Number(m.id));
+    }
+  }
+  return ids;
+}
+
+function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchItems, nowIso, maxBudget }) {
+  const starredIds = new Set(activeWatchItems.map((w) => Number(w.movieId)).filter(Boolean));
+  const candidates = [];
+
+  for (const m of catalogMovies) {
+    const prev = intelMap[String(m.id)];
+    const ageHours = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) / 60 : Infinity;
+    const isStarred = starredIds.has(Number(m.id));
+    const missingAnyScore =
+      !prev ||
+      prev.doubanScore === null ||
+      prev.imdbScore === null ||
+      prev.rtCriticsScore === null ||
+      !prev.enm;
+
+    if (!prev || (missingAnyScore && ageHours >= 4) || ageHours >= 24) {
+      const priorityScore =
+        (isStarred ? 1_000_000 : 0) +
+        (!prev ? 100_000 : 0) +
+        (m.source === 'onInfo' ? 50_000 : 0) +
+        Math.min(40_000, Math.floor((m.wish || 0) / 10));
+      candidates.push({ movie: m, priorityScore });
+    }
+  }
+
+  candidates.sort((a, b) => b.priorityScore - a.priorityScore);
+  return candidates.slice(0, maxBudget).map((c) => c.movie);
+}
+
 async function main() {
   const mode = process.env.RUN_MODE || 'tick'; // 'tick' | 'refresh_catalog' | 'test_push'
   const gistId = process.env.RADAR_GIST_ID || '';
@@ -56,6 +100,7 @@ async function main() {
   const vapidPublicKey = process.env.VAPID_PUBLIC_KEY || '';
   const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || '';
   const vapidSubject = process.env.VAPID_SUBJECT || 'mailto:dg-cinema-radar@example.com';
+  const omdbApiKey = process.env.OMDB_API_KEY || '';
   const pageUrl = process.env.PAGE_URL || '';
 
   const now = new Date();
@@ -65,10 +110,13 @@ async function main() {
   const prevPublic = (await readExistingPublicState()) || {
     cinemas: {},
     catalog: { onInfo: [], coming: [] },
-    alerts: []
+    intel: {},
+    wishSnapshots: {},
+    dynamics: [],
+    alerts: [],
+    catalogBaselineReady: false
   };
 
-  // Load private Gist state when configured; allow catalog-only seed run before Gist setup
   let privateState = null;
   if (gistId && ghToken) {
     privateState = await readPrivateGist({ gistId, token: ghToken });
@@ -79,10 +127,25 @@ async function main() {
   const watchlist = privateState?.watchlist || [];
   const subscriptions = privateState?.subscriptions || [];
   const webhooks = privateState?.webhooks || {};
-  const settings = privateState?.settings || { rotateMode: 'all', staggerMinMs: 850, staggerMaxMs: 1850, paused: false };
+  const settings = {
+    rotateMode: 'all',
+    staggerMinMs: 850,
+    staggerMaxMs: 1850,
+    notifyAllDynamics: true,
+    paused: false,
+    ...(privateState?.settings || {})
+  };
   const seen = privateState?.seen || {};
-  const runtime = privateState?.runtime || { consecutiveRiskHits: 0, cooldownUntil: '', lastRiskAlertAt: '', lastCatalogSyncAt: '', tickCounter: 0 };
+  const runtime = privateState?.runtime || {
+    consecutiveRiskHits: 0,
+    cooldownUntil: '',
+    lastRiskAlertAt: '',
+    lastCatalogSyncAt: '',
+    tickCounter: 0
+  };
   const alertsHistory = privateState?.alerts || prevPublic.alerts || [];
+  const prevDynamics = Array.isArray(prevPublic.dynamics) ? prevPublic.dynamics : [];
+  const prevIntelMap = prevPublic.intel || {};
 
   const activeWatchItems = watchlist.filter((w) => w && w.active !== false);
   const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject };
@@ -91,7 +154,7 @@ async function main() {
     const testResult = await dispatchAlerts({
       alertPayload: {
         title: '🔔 测试提醒｜东莞三影院雷达通道正常',
-        body: `当前监控：华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV\n当前星标：${activeWatchItems.length} 部电影\n时间：${nowIso}`,
+        body: `监控影院：华南MALL IMAX GT / 东城万达 IMAX / 民盈国贸城 CGV\n当前星标：${activeWatchItems.length} 部\n动态推送：${settings.notifyAllDynamics !== false ? '全量新片(定档/开票/改档/开分)' : '仅星标电影'}\n时间：${nowIso}`,
         url: pageUrl,
         tag: `test-${Date.now()}`
       },
@@ -110,11 +173,10 @@ async function main() {
     return;
   }
 
-  // Cooldown guard if Maoyan risk control previously triggered
   if (mode === 'tick' && runtime.cooldownUntil && new Date(runtime.cooldownUntil) > now) {
     console.log(`Risk-control cooldown active until ${runtime.cooldownUntil}; skipping Maoyan requests.`);
     await writePublicState({
-      updatedAt: prevPublic.updatedAt || nowIso,
+      ...prevPublic,
       lastTickAt: nowIso,
       vapidPublicKey,
       status: 'cooldown',
@@ -125,22 +187,23 @@ async function main() {
         cooldownUntil: runtime.cooldownUntil,
         consecutiveRiskHits: runtime.consecutiveRiskHits,
         lastReason: prevPublic.riskControl?.lastReason || '风控自动冷却中'
-      },
-      cinemas: prevPublic.cinemas || {},
-      catalog: prevPublic.catalog || { onInfo: [], coming: [] },
-      alerts: alertsHistory.slice(0, 30)
+      }
     });
     return;
   }
 
   const cookie = process.env.MAOYAN_COOKIE || settings.maoyanCookie || '';
+  const catalogAgeMin = minutesBetween(runtime.lastCatalogSyncAt || prevPublic.lastCatalogSyncAt || prevPublic.updatedAt, nowIso);
+  const prevCatalogCount = (prevPublic.catalog?.onInfo?.length || 0) + (prevPublic.catalog?.coming?.length || 0);
+  const needsCatalogRefresh =
+    mode === 'refresh_catalog' ||
+    catalogAgeMin >= CATALOG_REFRESH_INTERVAL_MIN ||
+    prevCatalogCount < 25;
 
-  // Idle protection ("注意猫眼风控"): when nothing is starred and not forced, only sync catalog every 30 min
-  const catalogAgeMin = minutesBetween(runtime.lastCatalogSyncAt || prevPublic.updatedAt, nowIso);
   const shouldScrapeCinemas =
     mode === 'refresh_catalog' ||
     activeWatchItems.length > 0 ||
-    catalogAgeMin >= 30 ||
+    needsCatalogRefresh ||
     Object.keys(prevPublic.cinemas || {}).length === 0;
 
   if (settings.paused && mode === 'tick') {
@@ -157,7 +220,7 @@ async function main() {
   }
 
   if (!shouldScrapeCinemas) {
-    console.log(`Idle mode (0 active stars, catalog age ${catalogAgeMin.toFixed(1)}m < 30m); 0 Maoyan requests made.`);
+    console.log(`Idle mode (0 active stars, catalog age ${catalogAgeMin.toFixed(1)}m < ${CATALOG_REFRESH_INTERVAL_MIN}m); 0 Maoyan requests made.`);
     await writePublicState({
       ...prevPublic,
       lastTickAt: nowIso,
@@ -169,11 +232,11 @@ async function main() {
     return;
   }
 
-  // Determine which cinemas to fetch this tick
+  // 1. Fetch cinema details
   const needsBaselineAll = activeWatchItems.some((w) => w.pendingBaselineInit);
   const tickCounter = Number(runtime.tickCounter || 0);
   const cinemasToFetch =
-    settings.rotateMode === 'round_robin' && mode === 'tick' && !needsBaselineAll
+    settings.rotateMode === 'round_robin' && mode === 'tick' && !needsBaselineAll && !needsCatalogRefresh
       ? [CINEMAS[tickCounter % CINEMAS.length]]
       : CINEMAS;
 
@@ -194,7 +257,6 @@ async function main() {
     cinemaResults.push(res);
   }
 
-  // Handle risk-control circuit breaker
   if (riskEvent) {
     const nextHits = Number(runtime.consecutiveRiskHits || 0) + 1;
     const backoffMin = computeBackoffMinutes(nextHits);
@@ -206,14 +268,13 @@ async function main() {
       tickCounter: tickCounter + 1
     };
 
-    // Send at most 1 risk alert per cooldown streak (or after > 60 min)
     const shouldWarnUser = !runtime.lastRiskAlertAt || minutesBetween(runtime.lastRiskAlertAt, nowIso) >= 60;
     if (privateState && shouldWarnUser) {
       nextRuntime.lastRiskAlertAt = nowIso;
       await dispatchAlerts({
         alertPayload: {
           title: `⚠️ 猫眼触发风控，已自动暂停 ${backoffMin} 分钟`,
-          body: `触发节点：${riskEvent.cinemaName}\n原因：${riskEvent.reason}\n将在 ${backoffMin} 分钟后自动恢复；你也可以在 Web App 设置中切为「轮转抓1家」或补充 Cookie。`,
+          body: `触发节点：${riskEvent.cinemaName}\n原因：${riskEvent.reason}\n将在 ${backoffMin} 分钟后自动恢复。`,
           url: pageUrl,
           tag: 'risk-warning'
         },
@@ -244,7 +305,7 @@ async function main() {
     return;
   }
 
-  // Merge newly fetched cinemas into snapshot
+  const prevCinemaMovieIds = collectCinemaMovieIds(prevPublic.cinemas || {});
   const mergedCinemas = { ...(prevPublic.cinemas || {}) };
   for (const r of cinemaResults) {
     if (r.ok) {
@@ -256,22 +317,104 @@ async function main() {
       };
     }
   }
+  const currCinemaMovieIds = collectCinemaMovieIds(mergedCinemas);
 
-  // Refresh coming/onInfo catalog periodically (or when manually triggered)
+  // 2. Fetch expanded catalog, wish growth, cross-platform scores & dynamic events
   let nextCatalog = prevPublic.catalog || { onInfo: [], coming: [] };
-  let lastCatalogSyncAt = runtime.lastCatalogSyncAt || '';
-  if (mode === 'refresh_catalog' || catalogAgeMin >= 30 || (nextCatalog.coming?.length || 0) === 0) {
-    await sleep(jitterDelay(600, 1200));
+  let lastCatalogSyncAt = runtime.lastCatalogSyncAt || prevPublic.lastCatalogSyncAt || '';
+  let nextWishSnapshots = prevPublic.wishSnapshots || {};
+  let nextIntelMap = { ...prevIntelMap };
+  let nextDynamics = prevDynamics;
+  let catalogBaselineReady = Boolean(prevPublic.catalogBaselineReady && prevCatalogCount >= 25);
+
+  if (needsCatalogRefresh) {
+    await sleep(jitterDelay(450, 900));
     const cat = await fetchMovieCatalog({ cookie });
     if (cat.ok) {
-      nextCatalog = { onInfo: cat.onInfo, coming: cat.coming };
+      const prevCatalogAll = [...(prevPublic.catalog?.onInfo || []), ...(prevPublic.catalog?.coming || [])];
+      const prevCatalogMap = Object.fromEntries(prevCatalogAll.map((m) => [String(m.id), m]));
+
+      const allRawCatalog = [...cat.onInfo, ...cat.coming];
+      nextWishSnapshots = updateWishSnapshots(nextWishSnapshots, allRawCatalog, todayStr);
+      const enrichedOnInfo = attachWishGrowth(cat.onInfo, nextWishSnapshots);
+      const enrichedComing = attachWishGrowth(cat.coming, nextWishSnapshots);
+      const allEnriched = [...enrichedOnInfo, ...enrichedComing];
+
+      // Prune intel cache to active catalog + starred movies so state.json stays compact
+      const keepIds = new Set([
+        ...allEnriched.map((m) => String(m.id)),
+        ...activeWatchItems.map((w) => String(w.movieId)).filter(Boolean)
+      ]);
+      const prunedIntel = {};
+      for (const [k, v] of Object.entries(nextIntelMap)) {
+        if (keepIds.has(k)) prunedIntel[k] = v;
+      }
+      nextIntelMap = prunedIntel;
+
+      // Incrementally enrich scores (Douban, IMDb, RT, Maoyan detailmovie) within safe budget
+      const budget = mode === 'refresh_catalog' ? 10 : 6;
+      const toEnrich = selectMoviesForIntelEnrichment({
+        catalogMovies: allEnriched,
+        intelMap: nextIntelMap,
+        activeWatchItems,
+        nowIso,
+        maxBudget: budget
+      });
+
+      for (const targetMovie of toEnrich) {
+        const key = String(targetMovie.id);
+        nextIntelMap[key] = await enrichMovieIntel(targetMovie, nextIntelMap[key] || {}, {
+          cookie,
+          omdbApiKey
+        });
+      }
+
+      // Detect 定档 / 改档 / 开票 / 开分
+      const newDynamicEvents = detectDynamicEvents({
+        prevCatalogMap,
+        currMovies: allEnriched,
+        prevIntelMap,
+        currIntelMap: nextIntelMap,
+        prevCinemaMovieIds,
+        currCinemaMovieIds,
+        todayStr,
+        nowIso,
+        baselineReady: catalogBaselineReady
+      });
+
+      if (newDynamicEvents.length > 0) {
+        const existingDynIds = new Set(prevDynamics.map((d) => d.id));
+        const uniqueNewEvents = newDynamicEvents.filter((e) => !existingDynIds.has(e.id));
+        if (uniqueNewEvents.length > 0) {
+          nextDynamics = [...uniqueNewEvents, ...prevDynamics].slice(0, 60);
+          if (privateState) {
+            const dynAlert = buildDynamicsAlert({
+              events: uniqueNewEvents,
+              watchlist,
+              notifyAllDynamics: settings.notifyAllDynamics !== false,
+              pageUrl
+            });
+            if (dynAlert) {
+              await dispatchAlerts({
+                alertPayload: dynAlert,
+                subscriptions,
+                webhooks,
+                vapid
+              });
+            }
+          }
+        }
+      }
+
+      nextCatalog = { onInfo: enrichedOnInfo, coming: enrichedComing };
       lastCatalogSyncAt = nowIso;
+      catalogBaselineReady = true;
     } else if (cat.riskTriggered) {
       console.warn('Catalog fetch hit risk control:', cat.reason);
     }
   }
 
-  // Diff wave rounds for all active starred movies
+  // 3. Diff per-round Dongguan 3-cinema ticket waves for starred movies
   const { findings, nextSeenMap, watchUpdates } = diffWatchlistRound({
     watchlist: activeWatchItems,
     cinemaResults,
@@ -334,7 +477,6 @@ async function main() {
     });
   }
 
-  // Reflect updated round counts in public summary immediately
   const updatedWatchlistPublic = summarizeWatchlistForPublic(
     watchlist.map((item) => (watchUpdates[item.id] ? { ...item, ...watchUpdates[item.id] } : item))
   );
@@ -342,6 +484,8 @@ async function main() {
   await writePublicState({
     updatedAt: nowIso,
     lastTickAt: nowIso,
+    lastCatalogSyncAt: lastCatalogSyncAt || nowIso,
+    catalogBaselineReady,
     vapidPublicKey,
     status: activeWatchItems.length > 0 ? 'watching' : 'idle',
     activeWatchCount: activeWatchItems.length,
@@ -354,11 +498,14 @@ async function main() {
     },
     cinemas: mergedCinemas,
     catalog: nextCatalog,
+    wishSnapshots: nextWishSnapshots,
+    intel: nextIntelMap,
+    dynamics: nextDynamics,
     alerts: nextAlerts
   });
 
   console.log(
-    `Tick complete. Mode=${mode}, Cinemas=${cinemaResults.length}, ActiveStars=${activeWatchItems.length}, WavesTriggered=${findings.length}`
+    `Tick complete. Mode=${mode}, Cinemas=${cinemaResults.length}, Catalog=${(nextCatalog.onInfo?.length || 0) + (nextCatalog.coming?.length || 0)}, ActiveStars=${activeWatchItems.length}, WavesTriggered=${findings.length}`
   );
 }
 

@@ -27,7 +27,7 @@ async function main() {
     owner,
     repoName,
     token,
-    message: 'fix(web): improve mobile pairing feedback, timeouts, and quick #pair import'
+    message: 'feat: expanded catalog, wish daily growth, all-movie dynamics & multi-platform scores'
   });
   console.log(`已成功更新 ${count} 个文件到 https://github.com/${owner}/${repoName} (Pages 将自动重新部署)`);
 }

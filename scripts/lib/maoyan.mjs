@@ -207,25 +207,8 @@ export async function fetchCinemaDetail(cinemaId, opts = {}) {
   };
 }
 
-/**
- * Fetches currently showing and upcoming movie catalogs from Maoyan (Dongguan cityId=91).
- */
-export async function fetchMovieCatalog(opts = {}) {
-  const onInfoUrl = 'https://m.maoyan.com/ajax/movieOnInfoList?token=';
-  const comingUrl = `https://m.maoyan.com/ajax/comingList?ci=${CITY_ID}&token=&limit=40`;
-
-  const onInfoRes = await fetchMaoyanJson(onInfoUrl, opts);
-  if (onInfoRes.riskTriggered) {
-    return { ok: false, riskTriggered: true, reason: onInfoRes.reason, onInfo: [], coming: [] };
-  }
-
-  await sleep(jitterDelay(500, 1100));
-  const comingRes = await fetchMaoyanJson(comingUrl, opts);
-  if (comingRes.riskTriggered) {
-    return { ok: false, riskTriggered: true, reason: comingRes.reason, onInfo: [], coming: [] };
-  }
-
-  const mapItem = (m, source) => ({
+function normalizeCatalogItem(m, source) {
+  return {
     id: Number(m.id),
     nm: m.nm || '',
     img: normalizePosterUrl(m.img || ''),
@@ -239,14 +222,122 @@ export async function fetchMovieCatalog(opts = {}) {
     globalReleased: Boolean(m.globalReleased),
     statusLabel: m.showStateButton?.content || (source === 'coming' ? '想看' : '热映'),
     source
+  };
+}
+
+/**
+ * Fetches expanded showing and upcoming movie catalogs from Maoyan (Dongguan cityId=91),
+ * paginating `movieIds` via `moreComingList` plus `mostExpected` rankings.
+ */
+export async function fetchMovieCatalog(opts = {}) {
+  const onInfoUrl = 'https://m.maoyan.com/ajax/movieOnInfoList?token=';
+  const comingUrl = `https://m.maoyan.com/ajax/comingList?ci=${CITY_ID}&token=&limit=20`;
+  const expectedUrl = `https://m.maoyan.com/ajax/mostExpected?ci=${CITY_ID}&limit=30&offset=0&token=`;
+
+  const onInfoRes = await fetchMaoyanJson(onInfoUrl, opts);
+  if (onInfoRes.riskTriggered) {
+    return { ok: false, riskTriggered: true, reason: onInfoRes.reason, onInfo: [], coming: [] };
+  }
+
+  await sleep(jitterDelay(450, 950));
+  const comingRes = await fetchMaoyanJson(comingUrl, opts);
+  if (comingRes.riskTriggered) {
+    return { ok: false, riskTriggered: true, reason: comingRes.reason, onInfo: [], coming: [] };
+  }
+
+  await sleep(jitterDelay(450, 950));
+  const expectedRes = await fetchMaoyanJson(expectedUrl, opts);
+
+  const onInfoMap = new Map();
+  for (const m of onInfoRes.data?.movieList || []) {
+    onInfoMap.set(Number(m.id), normalizeCatalogItem(m, 'onInfo'));
+  }
+
+  const comingMap = new Map();
+  for (const m of comingRes.data?.coming || []) {
+    comingMap.set(Number(m.id), normalizeCatalogItem(m, 'coming'));
+  }
+  if (expectedRes.ok && Array.isArray(expectedRes.data?.coming)) {
+    for (const m of expectedRes.data.coming) {
+      const id = Number(m.id);
+      if (!comingMap.has(id) && !onInfoMap.has(id)) {
+        comingMap.set(id, normalizeCatalogItem(m, 'coming'));
+      }
+    }
+  }
+
+  // Paginate extra IDs from movieOnInfoList (up to 48 more) and comingList (up to 80 more)
+  const missingOnInfoIds = (onInfoRes.data?.movieIds || [])
+    .map(Number)
+    .filter((id) => !onInfoMap.has(id))
+    .slice(0, 48);
+
+  const missingComingIds = (comingRes.data?.movieIds || [])
+    .map(Number)
+    .filter((id) => !comingMap.has(id) && !onInfoMap.has(id))
+    .slice(0, 80);
+
+  async function fetchMoreBatches(ids, targetMap, source, maxBatches = 4) {
+    const chunkSize = 20;
+    for (let b = 0; b < maxBatches; b++) {
+      const batch = ids.slice(b * chunkSize, (b + 1) * chunkSize);
+      if (batch.length === 0) break;
+      await sleep(jitterDelay(380, 820));
+      const url = `https://m.maoyan.com/ajax/moreComingList?ci=${CITY_ID}&token=&movieIds=${batch.join(',')}`;
+      const moreRes = await fetchMaoyanJson(url, opts);
+      if (moreRes.riskTriggered) break;
+      for (const m of moreRes.data?.coming || []) {
+        const id = Number(m.id);
+        if (!targetMap.has(id)) {
+          targetMap.set(id, normalizeCatalogItem(m, source));
+        }
+      }
+    }
+  }
+
+  await fetchMoreBatches(missingOnInfoIds, onInfoMap, 'onInfo', 3);
+  await fetchMoreBatches(missingComingIds, comingMap, 'coming', 4);
+
+  return {
+    ok: true,
+    riskTriggered: false,
+    reason: '',
+    onInfo: Array.from(onInfoMap.values()),
+    coming: Array.from(comingMap.values())
+  };
+}
+
+/**
+ * Fetches rich Maoyan movie detail (`enm`, `sc`, `snum`, `wish`, `rt`, `pubDesc`, `cat`, `dur`, `dra`).
+ */
+export async function fetchMaoyanMovieDetail(movieId, opts = {}) {
+  const url = `https://m.maoyan.com/ajax/detailmovie?movieId=${encodeURIComponent(movieId)}`;
+  const res = await fetchMaoyanJson(url, {
+    ...opts,
+    referer: `https://m.maoyan.com/movie/${movieId}`
   });
-
-  const onInfo = Array.isArray(onInfoRes.data?.movieList)
-    ? onInfoRes.data.movieList.map((m) => mapItem(m, 'onInfo'))
-    : [];
-  const coming = Array.isArray(comingRes.data?.coming)
-    ? comingRes.data.coming.map((m) => mapItem(m, 'coming'))
-    : [];
-
-  return { ok: true, riskTriggered: false, reason: '', onInfo, coming };
+  if (!res.ok || !res.data?.detailMovie) {
+    return { ok: false, riskTriggered: res.riskTriggered, data: null };
+  }
+  const dm = res.data.detailMovie;
+  return {
+    ok: true,
+    riskTriggered: false,
+    data: {
+      id: Number(dm.id || movieId),
+      nm: dm.nm || '',
+      enm: dm.enm || '',
+      sc: Number(dm.sc || 0),
+      snum: Number(dm.snum || 0),
+      wish: Number(dm.wish || 0),
+      rt: dm.rt || '',
+      pubDesc: dm.pubDesc || '',
+      cat: dm.cat || '',
+      dur: Number(dm.dur || 0),
+      dir: dm.dir || '',
+      star: dm.star || '',
+      dra: dm.dra || '',
+      img: normalizePosterUrl(dm.img || '')
+    }
+  };
 }
