@@ -9,9 +9,23 @@
 import { shiftDateStr } from './config.mjs';
 
 const CONCRETE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PARTIAL_DATE_RE = /^\d{4}(?:-\d{2})?$/;
 
 export function isConcreteDate(rt = '') {
   return CONCRETE_DATE_RE.test(String(rt || '').trim());
+}
+
+export function isPartialDate(rt = '') {
+  return PARTIAL_DATE_RE.test(String(rt || '').trim());
+}
+
+export function resolveEffectiveIntelDate(intel = {}) {
+  const pub = String(intel?.pubDesc || '');
+  const pubMatch = pub.match(/(\d{4}-\d{2}-\d{2})/);
+  if (pubMatch) return pubMatch[1];
+  const orig = String(intel?.origRt || '').trim();
+  if (isConcreteDate(orig) && !/重映/.test(pub)) return orig;
+  return '';
 }
 
 /**
@@ -167,7 +181,8 @@ export function detectDynamicEvents({
   currCinemaDetailMap = new Map(),
   todayStr,
   nowIso,
-  baselineReady = false
+  baselineReady = false,
+  suppressNewAdditions = false
 }) {
   const events = [];
   if (!baselineReady) {
@@ -179,14 +194,18 @@ export function detectDynamicEvents({
     const id = Number(curr.id);
     const key = String(id);
     const prev = prevCatalogMap[key];
-    const prevRt = (prev?.rt || '').trim();
+    const prevInt = prevIntelMap[key] || {};
+    const prevIntelDate = resolveEffectiveIntelDate(prevInt);
+    const prevRtRaw = (prev?.rt || '').trim();
+    const prevRt = isConcreteDate(prevRtRaw) ? prevRtRaw : (prevIntelDate || prevRtRaw);
     const currRt = (curr.rt || '').trim();
     const prevStatus = prev?.statusLabel || '';
     const currStatus = curr.statusLabel || '';
+    const hadKnownBaseline = Boolean(prev || prevIntelDate);
 
-    // 1. 定档 (scheduled) & 2. 改档 (rescheduled)
-    if (!prev) {
-      if (isConcreteDate(currRt) && currRt >= todayStr) {
+    // 1. 定档 (scheduled) & 2. 改档 / 撤档 (rescheduled)
+    if (!hadKnownBaseline) {
+      if (!suppressNewAdditions && isConcreteDate(currRt) && currRt >= todayStr) {
         events.push({
           id: `dyn_sch_${id}_${currRt}`,
           type: 'scheduled',
@@ -224,16 +243,30 @@ export function detectDynamicEvents({
           detail: `原定 ${prevRt}，调整为 ${currRt}`,
           createdAt: nowIso
         });
-      } else if (isConcreteDate(prevRt) && !currRt && !matchesComingTitleMonthDay(prevRt, curr.comingTitle)) {
+      } else if (isConcreteDate(prevRt) && !isConcreteDate(currRt) && prevRt >= todayStr && !matchesComingTitleMonthDay(prevRt, curr.comingTitle)) {
+        const nextLabel = curr.comingTitle || currRt || '待定';
+        const idSuffix = currRt || 'tbd';
         events.push({
-          id: `dyn_resch_${id}_${prevRt}_tbd`,
+          id: `dyn_resch_${id}_${prevRt}_${idSuffix}`,
           type: 'rescheduled',
           typeLabel: '改档',
           movieId: id,
           title: curr.nm,
           poster: curr.img || '',
-          summary: `档期变更：原 ${prevRt} 调整为待定`,
-          detail: `原定 ${prevRt}`,
+          summary: `档期变更：原 ${prevRt} 调整为 ${nextLabel}`,
+          detail: `原定 ${prevRt}，现为 ${nextLabel}`,
+          createdAt: nowIso
+        });
+      } else if (isPartialDate(prevRt) && isPartialDate(currRt) && prevRt !== currRt) {
+        events.push({
+          id: `dyn_resch_${id}_${prevRt}_${currRt}`,
+          type: 'rescheduled',
+          typeLabel: '改档',
+          movieId: id,
+          title: curr.nm,
+          poster: curr.img || '',
+          summary: `档期变更：${prevRt} → ${currRt}`,
+          detail: `原定 ${prevRt}，调整为 ${currRt}`,
           createdAt: nowIso
         });
       }
@@ -242,7 +275,8 @@ export function detectDynamicEvents({
     // 3. 开票 (presale_opened — only upcoming or within 2 days of release, not >2d-old catalog tails)
     const isBuyableNow = /预售|购票/.test(currStatus) || currCinemaMovieIds.has(id);
     const wasBuyableBefore = Boolean(prev && (/预售|购票/.test(prevStatus) || prevCinemaMovieIds.has(id)));
-    if (isBuyableNow && !wasBuyableBefore && !isPastPresaleWindow(currRt, todayStr)) {
+    const skipBackfillOpen = Boolean(suppressNewAdditions && !hadKnownBaseline);
+    if (!skipBackfillOpen && isBuyableNow && !wasBuyableBefore && !isPastPresaleWindow(currRt, todayStr)) {
       const monitoredDetail = currCinemaDetailMap.get(id) || '';
       const fallbackCityDetail = curr.showInfo ? `全市：${curr.showInfo}` : '';
       events.push({
@@ -259,7 +293,6 @@ export function detectDynamicEvents({
     }
 
     // 4. 开分 (scored across 猫眼 / 豆瓣 / IMDb / 烂番茄 — strictly fresh/upcoming transitions after baseline, never backfill)
-    const prevInt = prevIntelMap[key] || {};
     const currInt = currIntelMap[key] || {};
     const canEmitScore = isEligibleForScoreOpening(curr, currRt, prevInt, currInt, todayStr);
     const hadIntelBefore = Boolean(prevIntelMap[key]);

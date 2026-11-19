@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyHall, normalizePosterUrl, getBeijingDateStr } from '../lib/config.mjs';
-import { detectRiskControl, evaluateShowStatus } from '../lib/maoyan.mjs';
+import { detectRiskControl, evaluateShowStatus, fetchMovieCatalog } from '../lib/maoyan.mjs';
 import {
   buildConsolidatedAlert,
   computeBackoffMinutes,
@@ -9,7 +9,7 @@ import {
 } from '../lib/radar.mjs';
 import { updatePrivateGist } from '../lib/gist.mjs';
 import { bootstrapGitHubProject, sealGitHubSecret } from '../bootstrap-github.mjs';
-import { INTEL_MATCH_VERSION, fetchImdbIntel, fetchRottenTomatoesIntel, looksLikeMandarinPinyinOf, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
+import { INTEL_MATCH_VERSION, fetchDoubanIntel, fetchImdbIntel, fetchRottenTomatoesIntel, looksLikeMandarinPinyinOf, parseRottenTomatoesDetailJson, parseRottenTomatoesSearchRows, scoreTitleCandidate } from '../lib/intel.mjs';
 import { attachWishGrowth, buildDynamicsAlert, dedupeCatalogMovies, detectDynamicEvents, updateWishSnapshots } from '../lib/dynamics.mjs';
 import { buildMtopSign, fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from '../lib/taopiaopiao.mjs';
 import { DYNAMICS_EPOCH_VERSION, resolveBaselineDynamics, selectMoviesForIntelEnrichment } from '../monitor.mjs';
@@ -788,4 +788,225 @@ test('detectDynamicEvents ignores Maoyan coming stub rt="" flip-flop when coming
     currCinemaMovieIds: new Set()
   });
   assert.deepEqual(backToOnInfo, []);
+});
+
+test('fetchMovieCatalog paginates in chunks of 12 before mostExpected, uses showst fallback, and fails closed on partial risk control', async () => {
+  const comingIds = Array.from({ length: 28 }, (_, i) => 1000 + i);
+  const requestedBatches = [];
+  const mockMaoyan = async (url) => {
+    const u = new URL(url);
+    if (u.pathname.includes('movieOnInfoList')) {
+      return new Response(
+        JSON.stringify({
+          movieList: [{ id: 500, nm: '热映A', rt: '2026-11-15', showst: 3, globalReleased: true }],
+          movieIds: [500, 501]
+        }),
+        { status: 200 }
+      );
+    }
+    if (u.pathname.includes('comingList')) {
+      return new Response(
+        JSON.stringify({
+          coming: [{ id: 1000, nm: '新片1000', rt: '2026-11-25', showst: 4 }],
+          movieIds: comingIds
+        }),
+        { status: 200 }
+      );
+    }
+    if (u.pathname.includes('mostExpected')) {
+      return new Response(
+        JSON.stringify({
+          coming: [
+            { id: 1015, nm: '新片1015', comingTitle: '12月16日 周三', wish: 700000 }, // rt omitted by mostExpected!
+            { id: 9999, nm: '高期待独有', comingTitle: '2027年 待定', wish: 12000 }
+          ]
+        }),
+        { status: 200 }
+      );
+    }
+    if (u.pathname.includes('moreComingList')) {
+      const ids = u.searchParams.get('movieIds').split(',').map(Number);
+      requestedBatches.push(ids);
+      assert.ok(ids.length <= 12, `Expected chunk <= 12, got ${ids.length}`);
+      return new Response(
+        JSON.stringify({
+          coming: ids.map((id) => ({
+            id,
+            nm: id === 501 ? '未映点映501' : `新片${id}`,
+            rt: id === 9999 ? '' : id === 1015 ? '2026-12-16' : '2026-12-20',
+            comingTitle: id === 9999 ? '2027年 待定' : '12月20日 周日',
+            showst: id === 501 ? 1 : 4
+          }))
+        }),
+        { status: 200 }
+      );
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  const full = await fetchMovieCatalog({ fetchImpl: mockMaoyan, delayRange: [0, 0] });
+  assert.equal(full.ok, true);
+  assert.equal(full.onInfo.length, 2);
+  assert.equal(full.onInfo.find((m) => m.id === 501).statusLabel, '想看'); // showst=1 fallback instead of blind '热映'
+  assert.equal(full.coming.length, 29); // all 28 comingIds + extra 9999 from mostExpected
+  assert.equal(full.coming.find((m) => m.id === 1015).rt, '2026-12-16'); // NOT poisoned to '' by mostExpected!
+  assert.ok(requestedBatches.every((b) => b.length <= 12));
+
+  // Fail closed when one batch hits risk control
+  const riskFetch = async (url) => {
+    if (String(url).includes('moreComingList') && String(url).includes('1013')) {
+      return new Response('<!doctype html><html><body>验证中心</body></html>', { status: 200 });
+    }
+    return mockMaoyan(url);
+  };
+  const failed = await fetchMovieCatalog({ fetchImpl: riskFetch, delayRange: [0, 0] });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.riskTriggered, true);
+  assert.equal(failed.partial, true);
+});
+
+test('detectDynamicEvents catches reschedules from prevIntelMap, pulls to vague/partial dates, partial shifts, and suppresses schema backfill', () => {
+  const dyn = detectDynamicEvents({
+    baselineReady: true,
+    suppressNewAdditions: true,
+    todayStr: '2026-11-19',
+    nowIso: '2026-11-19T05:00:00Z',
+    prevCatalogMap: {
+      '2001': { id: 2001, nm: '撤档至待定年份', rt: '2026-11-27', comingTitle: '11月27日 周五', statusLabel: '想看' },
+      '2002': { id: 2002, nm: '推迟至明年五月', rt: '2026-12-10', comingTitle: '12月10日 周四', statusLabel: '想看' },
+      '2003': { id: 2003, nm: '全撤档空日期', rt: '2026-12-01', comingTitle: '12月1日 周二', statusLabel: '想看' },
+      '2004': { id: 2004, nm: '待定年份后延', rt: '2026', comingTitle: '2026年 待定', statusLabel: '想看' }
+    },
+    prevIntelMap: {
+      '1608228': { movieId: 1608228, origRt: '2026-11-27', pubDesc: '2026-11-27中国大陆上映' }
+    },
+    currMovies: [
+      { id: 1608228, nm: '肆条', rt: '2027-01-15', comingTitle: '2027年1月15日 周五', statusLabel: '想看' },
+      { id: 2001, nm: '撤档至待定年份', rt: '2026', comingTitle: '2026年 待定', statusLabel: '想看' },
+      { id: 2002, nm: '推迟至明年五月', rt: '2027-05', comingTitle: '2027年5月 待定', statusLabel: '想看' },
+      { id: 2003, nm: '全撤档空日期', rt: '', comingTitle: '', statusLabel: '想看' },
+      { id: 2004, nm: '待定年份后延', rt: '2027', comingTitle: '2027年 待定', statusLabel: '想看' },
+      { id: 3001, nm: '补齐的历史新片', rt: '2026-12-24', comingTitle: '12月24日 周四', statusLabel: '预售' }
+    ],
+    prevCinemaMovieIds: new Set(),
+    currCinemaMovieIds: new Set()
+  });
+
+  const resch = dyn.filter((e) => e.type === 'rescheduled');
+  assert.equal(resch.length, 5);
+  assert.equal(resch.find((e) => e.movieId === 1608228).summary, '档期变更：2026-11-27 → 2027-01-15');
+  assert.equal(resch.find((e) => e.movieId === 2001).summary, '档期变更：原 2026-11-27 调整为 2026年 待定');
+  assert.equal(resch.find((e) => e.movieId === 2002).summary, '档期变更：原 2026-12-10 调整为 2027年5月 待定');
+  assert.equal(resch.find((e) => e.movieId === 2003).summary, '档期变更：原 2026-12-01 调整为 待定');
+  assert.equal(resch.find((e) => e.movieId === 2004).summary, '档期变更：2026 → 2027');
+
+  // Newly backfilled item 3001 must NOT emit fake 定档 or 开票 during schema upgrade
+  assert.equal(dyn.filter((e) => e.movieId === 3001).length, 0);
+});
+
+test('selectMoviesForIntelEnrichment deduplicates catalog duplicates and prevents starvation across legacy & onInfo items', () => {
+  const nowIso = '2026-11-19T05:00:00Z';
+  const catalogMovies = [
+    { id: 100, nm: '重复热映片', source: 'onInfo', rt: '2026-11-19', wish: 50000 },
+    { id: 100, nm: '重复热映片', source: 'coming', rt: '2026-11-19', wish: 50000 },
+    { id: 200, nm: 'v1待升级老片', source: 'onInfo', rt: '2026-11-08', wish: 1000 },
+    ...Array.from({ length: 26 }, (_, i) => ({
+      id: 9000 + i,
+      nm: `远期星标${i}`,
+      source: 'coming',
+      rt: '2026-12-12',
+      wish: 100000
+    }))
+  ];
+  const intelMap = {
+    '100': { matchVersion: INTEL_MATCH_VERSION, doubanScore: null, imdbScore: null, rtCriticsScore: null, enm: 'Dup', checkedAt: '2026-11-19T04:50:00Z' },
+    '200': { matchVersion: 1, doubanScore: null, checkedAt: '2026-11-18T00:00:00Z' }
+  };
+  const activeWatchItems = [];
+  for (let i = 0; i < 26; i++) {
+    activeWatchItems.push({ movieId: 9000 + i, active: true });
+    intelMap[String(9000 + i)] = {
+      matchVersion: INTEL_MATCH_VERSION,
+      doubanScore: null,
+      imdbScore: null,
+      rtCriticsScore: null,
+      enm: `Star${i}`,
+      checkedAt: '2026-11-19T04:50:00Z' // checked 10m ago (<60m cooldown for far-future starred)
+    };
+  }
+
+  const picked = selectMoviesForIntelEnrichment({
+    catalogMovies,
+    intelMap,
+    activeWatchItems,
+    nowIso,
+    todayStr: '2026-11-19',
+    maxBudget: 10
+  });
+  const ids = picked.map((m) => m.id);
+  assert.deepEqual(ids, [200, 100]); // deduplicated 100 + v1 legacy 200 NOT starved by 26 far-future stars
+});
+
+test('fetchDoubanIntel accepts delayed mainland imports and bilingual+year matches with director transliteration variance', async () => {
+  const mockDouban = async (url) => {
+    const u = String(url);
+    if (u.includes('subject_suggest') && decodeURIComponent(u).includes('霹雳英雄')) {
+      return new Response(
+        JSON.stringify([{ id: '35622269', title: '霹雳英雄：素还真', sub_title: '素還真', year: '2022', type: 'movie' }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('/movie/35622269')) {
+      return new Response(
+        JSON.stringify({
+          title: '霹雳英雄：素还真',
+          original_title: '素還真',
+          year: '2022',
+          rating: { value: 6.8, count: 971 },
+          directors: [{ name: '黄强华' }],
+          aka: ['Demigod: The Legend Begins']
+        }),
+        { status: 200 }
+      );
+    }
+    if (u.includes('subject_suggest') && decodeURIComponent(u).includes('小羊肖恩3')) {
+      return new Response(
+        JSON.stringify([{ id: '37344902', title: '小羊肖恩3：怪兽来袭', sub_title: 'Shaun the Sheep: The Beast of Mossy Bottom', year: '2026', type: 'movie' }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('/movie/37344902')) {
+      return new Response(
+        JSON.stringify({
+          title: '小羊肖恩3：怪兽来袭',
+          original_title: 'Shaun the Sheep: The Beast of Mossy Bottom',
+          year: '2026',
+          rating: { value: 0, count: 0 },
+          directors: [{ name: 'Steve Cox' }], // Latin spelling vs Maoyan's '史蒂夫·考克斯'
+          aka: []
+        }),
+        { status: 200 }
+      );
+    }
+    return new Response('[]', { status: 200 });
+  };
+
+  const pili = await fetchDoubanIntel({
+    title: '霹雳英雄：素还真',
+    enm: 'DEMIGOD: The Legend Begins',
+    year: 2026,
+    dir: '黄强华',
+    fetchImpl: mockDouban
+  });
+  assert.equal(pili.doubanId, '35622269');
+  assert.equal(pili.doubanScore, 6.8);
+
+  const shaun = await fetchDoubanIntel({
+    title: '小羊肖恩3：怪兽来袭',
+    enm: 'Shaun the Sheep: The Beast of Mossy Bottom',
+    year: 2026,
+    dir: '史蒂夫·考克斯,马修·沃克',
+    fetchImpl: mockDouban
+  });
+  assert.equal(shaun.doubanId, '37344902');
 });

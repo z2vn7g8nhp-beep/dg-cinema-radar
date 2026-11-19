@@ -278,11 +278,11 @@ function resolveMovieReleaseDate(movie, intel = {}) {
   const rt = String(movie.rt || '').trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(rt)) return rt;
 
-  const origRt = String(intel.origRt || '').trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(origRt) && !/重映/.test(intel.pubDesc || movie.nm || '')) return origRt;
-
   const pubMatch = String(intel.pubDesc || '').match(/(\d{4}-\d{2}-\d{2})/);
   if (pubMatch) return pubMatch[1];
+
+  const origRt = String(intel.origRt || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(origRt) && !/重映/.test(intel.pubDesc || movie.nm || '')) return origRt;
 
   const ymdZhMatch = `${movie.comingTitle || ''} ${intel.pubDesc || ''}`.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
   if (ymdZhMatch) {

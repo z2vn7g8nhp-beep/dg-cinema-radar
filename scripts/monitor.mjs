@@ -11,7 +11,7 @@ import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CINEMAS, CINEMA_MAP, getBeijingDateStr, shiftDateStr } from './lib/config.mjs';
-import { fetchCinemaDetail, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
+import { fetchCinemaDetail, fetchMaoyanMovieDetail, fetchMoreComingByIds, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
 import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
 import { INTEL_MATCH_VERSION, enrichMovieIntel } from './lib/intel.mjs';
@@ -20,6 +20,7 @@ import {
   buildDynamicsAlert,
   dedupeCatalogMovies,
   detectDynamicEvents,
+  isConcreteDate,
   updateWishSnapshots
 } from './lib/dynamics.mjs';
 import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
@@ -28,6 +29,7 @@ import { dispatchAlerts } from './lib/notifier.mjs';
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
 const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
 export const DYNAMICS_EPOCH_VERSION = 4;
+export const CATALOG_SCHEMA_VERSION = 2;
 
 export function resolveBaselineDynamics(prevPublic) {
   if (Number(prevPublic?.dynamicsVersion || 1) < DYNAMICS_EPOCH_VERSION) {
@@ -104,14 +106,16 @@ function collectCinemaDetailMap(cinemasObj = {}) {
 }
 
 export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, activeWatchItems, nowIso, todayStr = '', maxBudget = 16 }) {
+  const uniqueMovies = dedupeCatalogMovies(catalogMovies).list;
   const starredIds = new Set(activeWatchItems.map((w) => Number(w.movieId)).filter(Boolean));
   const windowStart = todayStr ? shiftDateStr(todayStr, -14) : '';
-  const windowEnd = todayStr ? shiftDateStr(todayStr, 14) : '';
+  const windowEnd = todayStr ? shiftDateStr(todayStr, 5) : '';
   const candidates = [];
 
-  for (const m of catalogMovies) {
+  for (const m of uniqueMovies) {
     const prev = intelMap[String(m.id)];
     const needsV2Upgrade = !prev || prev.matchVersion !== INTEL_MATCH_VERSION;
+    const neverChecked = !prev?.checkedAt;
     const ageMin = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) : Infinity;
     const isStarred = starredIds.has(Number(m.id));
     const rt = String(m.rt || '').trim();
@@ -122,27 +126,32 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
       rt >= windowStart &&
       rt <= windowEnd
     );
-    const isHotOrSoon = isStarred || m.source === 'onInfo' || isNearRelease;
-    const missingAnyScore =
+    const isInHotWindow = m.source === 'onInfo' || isNearRelease;
+    const hasChineseDir = /[\u4e00-\u9fff]/.test(String(prev?.dir || ''));
+    const missingKeyScore =
       needsV2Upgrade ||
       prev.doubanScore === null ||
       prev.imdbScore === null ||
-      prev.rtCriticsScore === null ||
+      (!hasChineseDir && prev.rtCriticsScore === null) ||
       !prev.enm;
 
     const eligible =
       needsV2Upgrade ||
-      (isHotOrSoon && ((missingAnyScore && ageMin >= 4.5) || ageMin >= 60)) ||
-      (!isHotOrSoon && ((missingAnyScore && ageMin >= 240) || ageMin >= 1440));
+      neverChecked ||
+      (isInHotWindow && ((missingKeyScore && ageMin >= 4.5) || ageMin >= 180)) ||
+      (isStarred && ageMin >= 60) ||
+      (!isInHotWindow && !isStarred && ((missingKeyScore && ageMin >= 360) || ageMin >= 1440));
 
     if (eligible) {
+      const cappedAgeMin = Number.isFinite(ageMin) ? Math.min(ageMin, 1440) : 1440;
       const priorityScore =
-        (isStarred ? 1_000_000 : 0) +
-        (needsV2Upgrade ? 200_000 : 0) +
-        (isNearRelease ? 80_000 : 0) +
-        (m.source === 'onInfo' ? 50_000 : 0) +
-        (missingAnyScore ? 20_000 : 0) +
-        Math.min(40_000, Math.floor((m.wish || 0) / 10));
+        (needsV2Upgrade ? 500_000 : 0) +
+        (neverChecked ? 350_000 : 0) +
+        (isInHotWindow && isStarred ? 250_000 : 0) +
+        (isInHotWindow ? 150_000 : 0) +
+        (isStarred ? 80_000 : 0) +
+        Math.min(200_000, Math.floor(cappedAgeMin * 140)) +
+        Math.min(30_000, Math.floor((m.wish || 0) / 20));
       candidates.push({ movie: m, priorityScore });
     }
   }
@@ -235,6 +244,7 @@ async function main() {
     console.log(`Risk-control cooldown active until ${runtime.cooldownUntil}; skipping Maoyan requests.`);
     await writePublicState({
       ...prevPublic,
+      catalogSchemaVersion: Number(prevPublic?.catalogSchemaVersion || 1),
       dynamicsVersion: DYNAMICS_EPOCH_VERSION,
       dynamics: prevDynamics,
       lastTickAt: nowIso,
@@ -255,10 +265,12 @@ async function main() {
   const cookie = process.env.MAOYAN_COOKIE || settings.maoyanCookie || '';
   const catalogAgeMin = minutesBetween(runtime.lastCatalogSyncAt || prevPublic.lastCatalogSyncAt || prevPublic.updatedAt, nowIso);
   const prevCatalogCount = (prevPublic.catalog?.onInfo?.length || 0) + (prevPublic.catalog?.coming?.length || 0);
+  const catalogSchemaUpgrade = Number(prevPublic?.catalogSchemaVersion || 1) < CATALOG_SCHEMA_VERSION;
   const needsCatalogRefresh =
     mode === 'refresh_catalog' ||
     catalogAgeMin >= CATALOG_REFRESH_INTERVAL_MIN ||
-    prevCatalogCount < 25;
+    prevCatalogCount < 25 ||
+    catalogSchemaUpgrade;
 
   const shouldScrapeCinemas =
     mode === 'refresh_catalog' ||
@@ -270,6 +282,7 @@ async function main() {
     console.log('Monitoring paused by user settings; skipping Maoyan requests.');
     await writePublicState({
       ...prevPublic,
+      catalogSchemaVersion: Number(prevPublic?.catalogSchemaVersion || 1),
       dynamicsVersion: DYNAMICS_EPOCH_VERSION,
       dynamics: prevDynamics,
       lastTickAt: nowIso,
@@ -285,6 +298,7 @@ async function main() {
     console.log(`Idle mode (0 active stars, catalog age ${catalogAgeMin.toFixed(1)}m < ${CATALOG_REFRESH_INTERVAL_MIN}m); 0 Maoyan requests made.`);
     await writePublicState({
       ...prevPublic,
+      catalogSchemaVersion: Number(prevPublic?.catalogSchemaVersion || 1),
       dynamicsVersion: DYNAMICS_EPOCH_VERSION,
       dynamics: prevDynamics,
       lastTickAt: nowIso,
@@ -354,6 +368,7 @@ async function main() {
 
     await writePublicState({
       ...prevPublic,
+      catalogSchemaVersion: Number(prevPublic?.catalogSchemaVersion || 1),
       dynamicsVersion: DYNAMICS_EPOCH_VERSION,
       dynamics: prevDynamics,
       lastTickAt: nowIso,
@@ -393,6 +408,9 @@ async function main() {
   let nextIntelMap = { ...prevIntelMap };
   let nextDynamics = prevDynamics;
   let catalogBaselineReady = Boolean(prevPublic.catalogBaselineReady && prevCatalogCount >= 25);
+  let nextCatalogSchemaVersion = Number(prevPublic?.catalogSchemaVersion || 1);
+  let activeSubscriptions = subscriptions;
+  let updatedSubs;
 
   if (needsCatalogRefresh) {
     await sleep(jitterDelay(450, 900));
@@ -407,7 +425,63 @@ async function main() {
       const enrichedComing = attachWishGrowth(cat.coming, nextWishSnapshots);
       const allEnriched = [...enrichedOnInfo, ...enrichedComing];
 
-      // Prune intel cache to active catalog + starred movies & upgrade legacy entries safely
+      // Probe vanished active-starred and upcoming-scheduled movies so silent reschedules/pulls are still caught
+      const presentIds = new Set(allEnriched.map((m) => Number(m.id)));
+      const activeStarIdSet = new Set(activeWatchItems.map((w) => Number(w.movieId)).filter(Boolean));
+      const missingStarIds = [...activeStarIdSet].filter((id) => !presentIds.has(id));
+      const missingScheduledIds = Object.values(prevCatalogMap)
+        .filter((p) => p && isConcreteDate(p.rt) && p.rt >= todayStr && !presentIds.has(Number(p.id)) && !activeStarIdSet.has(Number(p.id)))
+        .map((p) => Number(p.id))
+        .slice(0, 12);
+      const missingCheckIds = Array.from(new Set([...missingStarIds, ...missingScheduledIds]));
+      const probedMissingMovies = [];
+      const probedById = new Map();
+
+      if (missingCheckIds.length > 0) {
+        const probedMore = await fetchMoreComingByIds(missingCheckIds.slice(0, 24), {
+          cookie,
+          source: 'coming',
+          maxBatches: 2,
+          delayRange: [200, 380]
+        }).catch(() => ({ ok: false, movies: [] }));
+        for (const pm of probedMore.movies || []) {
+          probedById.set(Number(pm.id), pm);
+        }
+        for (const starId of missingStarIds) {
+          const existingProbe = probedById.get(starId);
+          if (!existingProbe || !existingProbe.rt) {
+            const dm = await fetchMaoyanMovieDetail(starId, { cookie }).catch(() => ({ ok: false }));
+            if (dm.ok && dm.data) {
+              const pubMatch = String(dm.data.pubDesc || '').match(/(\d{4}-\d{2}-\d{2})/);
+              const effectiveRt =
+                (/重映/.test(dm.data.pubDesc || '') && pubMatch ? pubMatch[1] : '') ||
+                dm.data.rt ||
+                (pubMatch ? pubMatch[1] : '');
+              const prevM = prevCatalogMap[String(starId)];
+              probedById.set(starId, {
+                id: starId,
+                nm: dm.data.nm || existingProbe?.nm || prevM?.nm || '',
+                img: dm.data.img || existingProbe?.img || prevM?.img || '',
+                rt: effectiveRt,
+                comingTitle: existingProbe?.comingTitle || (effectiveRt ? effectiveRt : '待定'),
+                showInfo: existingProbe?.showInfo || '',
+                star: dm.data.star || existingProbe?.star || '',
+                sc: dm.data.sc || 0,
+                wish: dm.data.wish || 0,
+                version: existingProbe?.version || '',
+                globalReleased: false,
+                statusLabel: existingProbe?.statusLabel || '想看',
+                source: 'coming'
+              });
+            }
+          }
+        }
+        for (const pm of probedById.values()) {
+          probedMissingMovies.push(pm);
+        }
+      }
+
+      // Prune intel cache to active catalog + starred + probed movies & upgrade legacy entries safely
       const upgradeCount = Object.values(nextIntelMap).filter(
         (v) => v && v.matchVersion !== INTEL_MATCH_VERSION
       ).length;
@@ -419,6 +493,7 @@ async function main() {
       }
       const keepIds = new Set([
         ...allEnriched.map((m) => String(m.id)),
+        ...probedMissingMovies.map((m) => String(m.id)),
         ...activeWatchItems.map((w) => String(w.movieId)).filter(Boolean)
       ]);
       const prunedIntel = {};
@@ -495,11 +570,18 @@ async function main() {
       const recheckedIds = new Set();
       for (const targetMovie of toEnrich) {
         const key = String(targetMovie.id);
+        const prevEntry = nextIntelMap[key] || {};
+        const prevAgeMin = prevEntry.checkedAt ? minutesBetween(prevEntry.checkedAt, nowIso) : Infinity;
+        const forceDetailRefresh =
+          (activeStarIdSet.has(Number(targetMovie.id)) && prevAgeMin >= 55) ||
+          (targetMovie.source === 'onInfo' && !(prevEntry.maoyanScore > 0) && prevAgeMin >= 25);
         recheckedIds.add(Number(targetMovie.id));
-        nextIntelMap[key] = await enrichMovieIntel(targetMovie, nextIntelMap[key] || {}, {
+        nextIntelMap[key] = await enrichMovieIntel(targetMovie, prevEntry, {
           cookie,
           omdbApiKey,
-          tppMatch: tppMatchedMap.get(Number(targetMovie.id)) || null
+          tppMatch: tppMatchedMap.get(Number(targetMovie.id)) || null,
+          forceDetailRefresh,
+          todayStr
         });
       }
 
@@ -524,7 +606,7 @@ async function main() {
       // Detect 定档 / 改档 / 开票 / 开分
       const newDynamicEvents = detectDynamicEvents({
         prevCatalogMap,
-        currMovies: allEnriched,
+        currMovies: [...allEnriched, ...probedMissingMovies],
         prevIntelMap,
         currIntelMap: nextIntelMap,
         prevCinemaMovieIds,
@@ -532,7 +614,8 @@ async function main() {
         currCinemaDetailMap,
         todayStr,
         nowIso,
-        baselineReady: catalogBaselineReady
+        baselineReady: catalogBaselineReady,
+        suppressNewAdditions: catalogSchemaUpgrade
       });
 
       if (newDynamicEvents.length > 0) {
@@ -548,12 +631,21 @@ async function main() {
               pageUrl
             });
             if (dynAlert) {
-              await dispatchAlerts({
+              const dynPushRes = await dispatchAlerts({
                 alertPayload: dynAlert,
-                subscriptions,
+                subscriptions: activeSubscriptions,
                 webhooks,
                 vapid
               });
+              console.log('Dynamics alert dispatched:', dynAlert.title, JSON.stringify({
+                webPushSent: dynPushRes.webPushSent,
+                webhooksSent: dynPushRes.webhooksSent,
+                expiredRemoved: dynPushRes.expiredRemoved
+              }));
+              if (dynPushRes.expiredRemoved > 0) {
+                activeSubscriptions = dynPushRes.aliveSubscriptions;
+                updatedSubs = dynPushRes.aliveSubscriptions;
+              }
             }
           }
         }
@@ -562,8 +654,11 @@ async function main() {
       nextCatalog = { onInfo: enrichedOnInfo, coming: enrichedComing };
       lastCatalogSyncAt = nowIso;
       catalogBaselineReady = true;
+      nextCatalogSchemaVersion = CATALOG_SCHEMA_VERSION;
     } else if (cat.riskTriggered) {
       console.warn('Catalog fetch hit risk control:', cat.reason);
+    } else {
+      console.warn('Catalog fetch incomplete/failed (keeping previous catalog):', cat.reason);
     }
   }
 
@@ -578,12 +673,11 @@ async function main() {
 
   const alertPayload = buildConsolidatedAlert(findings, pageUrl);
   let nextAlerts = alertsHistory;
-  let updatedSubs;
 
   if (alertPayload && privateState) {
     const pushRes = await dispatchAlerts({
       alertPayload,
-      subscriptions,
+      subscriptions: activeSubscriptions,
       webhooks,
       vapid
     });
@@ -594,6 +688,7 @@ async function main() {
     }));
 
     if (pushRes.expiredRemoved > 0) {
+      activeSubscriptions = pushRes.aliveSubscriptions;
       updatedSubs = pushRes.aliveSubscriptions;
     }
 
@@ -639,6 +734,7 @@ async function main() {
     lastTickAt: nowIso,
     lastCatalogSyncAt: lastCatalogSyncAt || nowIso,
     catalogBaselineReady,
+    catalogSchemaVersion: nextCatalogSchemaVersion,
     dynamicsVersion: DYNAMICS_EPOCH_VERSION,
     vapidPublicKey,
     status: activeWatchItems.length > 0 ? 'watching' : 'idle',

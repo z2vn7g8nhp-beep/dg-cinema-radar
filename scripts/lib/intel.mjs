@@ -6,6 +6,7 @@
  * - Rotten Tomatoes (`www.rottentomatoes.com/search` + detail page with strict title/year/cast guard)
  */
 
+import { shiftDateStr } from './config.mjs';
 import { fetchMaoyanMovieDetail, jitterDelay, sleep } from './maoyan.mjs';
 
 export const INTEL_MATCH_VERSION = 3;
@@ -213,7 +214,7 @@ export async function fetchDoubanIntel({ title, enm = '', year = null, dir = '',
   const candidateIds = [];
 
   if (knownId) {
-    candidateIds.push({ id: String(knownId), subTitle: '' });
+    candidateIds.push({ id: String(knownId), subTitle: '', bothZhEnMatch: false, delayedYearCheck: false });
   } else if (title) {
     const list = await fetchJsonSafe(
       `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(title)}`,
@@ -224,19 +225,31 @@ export async function fetchDoubanIntel({ title, enm = '', year = null, dir = '',
     const moviesOnly = (Array.isArray(list) ? list : []).filter((item) => item.type === 'movie');
     const scored = moviesOnly
       .map((c) => {
+        const candYear = extractYear(c.year);
         const zhScore = scoreStrictTitleMatch(c.title, title);
         const enScore = enm ? Math.max(scoreStrictTitleMatch(c.sub_title, enm), scoreStrictTitleMatch(c.title, enm)) : 0;
         const bothZhEnMatch = zhScore >= 96 && enScore >= 96;
         let s = scoreTitleCandidate(
-          { candTitle: c.title, candSubTitle: c.sub_title, candYear: extractYear(c.year) },
+          { candTitle: c.title, candSubTitle: c.sub_title, candYear },
           { title, enm, year }
         );
         if (bothZhEnMatch && s < 0) {
           s = 90;
         }
+        const isDelayedImport = Boolean(
+          zhScore === 100 && candYear && year && candYear <= year && (year - candYear) <= 10
+        );
+        if (isDelayedImport && s < 86) {
+          s = 86;
+        }
+        const delayedYearCheck = Boolean(
+          candYear && year && Math.abs(candYear - year) >= 3 && !bothZhEnMatch
+        );
         return {
           id: String(c.id),
           subTitle: c.sub_title || '',
+          bothZhEnMatch,
+          delayedYearCheck,
           score: s + (bothZhEnMatch ? 60 : 0)
         };
       })
@@ -244,7 +257,12 @@ export async function fetchDoubanIntel({ title, enm = '', year = null, dir = '',
       .sort((a, b) => b.score - a.score);
 
     for (const c of scored.slice(0, 3)) {
-      candidateIds.push({ id: c.id, subTitle: c.subTitle });
+      candidateIds.push({
+        id: c.id,
+        subTitle: c.subTitle,
+        bothZhEnMatch: c.bothZhEnMatch,
+        delayedYearCheck: c.delayedYearCheck
+      });
     }
   }
 
@@ -260,12 +278,30 @@ export async function fetchDoubanIntel({ title, enm = '', year = null, dir = '',
     const doubanYear = extractYear(detail?.year);
     const allDbTitles = [detail?.title, detail?.original_title, ...(detail?.aka || []), cand.subTitle].filter(Boolean);
 
-    // Reject obvious director collision when both Maoyan and Douban specify directors
-    if (!knownId && directors.length > 0 && detailDirs.length > 0) {
+    let hasDirOverlap = false;
+    if (directors.length > 0 && detailDirs.length > 0) {
       const cDirs = new Set(detailDirs.map((d) => normalizeTitle(d)).filter((x) => x.length >= 2));
-      const overlap = directors.some((d) => cDirs.has(d));
-      if (!overlap) {
-        continue;
+      hasDirOverlap = directors.some((d) => cDirs.has(d));
+    }
+    const hasEnAkaMatch = Boolean(
+      enm &&
+      [detail?.original_title, ...(detail?.aka || []), cand.subTitle]
+        .filter(Boolean)
+        .some((t) => scoreStrictTitleMatch(t, enm) >= 96)
+    );
+
+    if (!knownId) {
+      if (cand.delayedYearCheck) {
+        if (!hasDirOverlap && !hasEnAkaMatch) {
+          continue;
+        }
+      } else if (directors.length > 0 && detailDirs.length > 0 && !hasDirOverlap) {
+        const strongBilingualYear = Boolean(
+          cand.bothZhEnMatch && doubanYear && year && Math.abs(doubanYear - year) <= 1
+        );
+        if (!strongBilingualYear) {
+          continue;
+        }
       }
     }
 
@@ -603,7 +639,11 @@ export async function fetchRottenTomatoesIntel({
  * Enriches one movie with Maoyan detail (`enm`, `sc`, `cat`, `dur`, `pubDesc`) plus Douban, IMDb, and RT scores.
  * Uses bilingual Chinese+English queries plus year & director/cast cross-checks to prevent false platform matches.
  */
-export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omdbApiKey = '', tppMatch = null, fetchImpl = fetch } = {}) {
+export async function enrichMovieIntel(
+  movie,
+  prevIntel = {},
+  { cookie = '', omdbApiKey = '', tppMatch = null, forceDetailRefresh = false, todayStr = '', fetchImpl = fetch } = {}
+) {
   const isCurrent = prevIntel?.matchVersion === INTEL_MATCH_VERSION;
   const basePrev = isCurrent ? prevIntel : {};
   // Keep already-verified Douban ID/score passed from monitor.mjs while re-verifying IMDb/RT under v3
@@ -645,7 +685,7 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
     checkedAt: new Date().toISOString()
   };
 
-  if (!next.pubDesc || !next.origRt) {
+  if (!next.pubDesc || !next.origRt || forceDetailRefresh) {
     try {
       const dm = await fetchMaoyanMovieDetail(movie.id, { cookie, fetchImpl });
       if (dm.ok && dm.data) {
@@ -668,7 +708,12 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
   const zhTitles = [...(next.doubanZhAka || [])];
 
   // Douban (matched by Chinese + English + director/year)
-  if (!next.doubanScore || !next.doubanId || !next.doubanYear || !next.doubanMetaLoaded) {
+  const isFarFuture = Boolean(
+    todayStr &&
+    /^\d{4}-\d{2}-\d{2}$/.test(String(movie.rt || '').trim()) &&
+    String(movie.rt).trim() > shiftDateStr(todayStr, 7)
+  );
+  if (!(isFarFuture && next.doubanId && next.doubanMetaLoaded) && (!next.doubanScore || !next.doubanId || !next.doubanYear || !next.doubanMetaLoaded)) {
     try {
       await sleep(jitterDelay(250, 500));
       const db = await fetchDoubanIntel({
@@ -753,7 +798,9 @@ export async function enrichMovieIntel(movie, prevIntel = {}, { cookie = '', omd
   }
 
   // Rotten Tomatoes (strict title + year + actor verification)
-  if (next.rtCriticsScore === null || !next.rtUrl) {
+  const hasChineseDir = /[\u4e00-\u9fff]/.test(String(next.dir || ''));
+  const skipDomesticRt = Boolean(!next.rtUrl && hasChineseDir && !hasLatinLetters(next.enm) && !next.imdbTitle);
+  if (!skipDomesticRt && (next.rtCriticsScore === null || !next.rtUrl)) {
     try {
       await sleep(jitterDelay(250, 550));
       const rt = await fetchRottenTomatoesIntel({
