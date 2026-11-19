@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#faf8f4" />
+  <meta name="theme-color" content="#f7f4ee" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="影院雷达" />
@@ -14,10 +14,12 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
+  <div class="safe-top-scrim" aria-hidden="true"></div>
   <div class="app-shell">
-    <header class="topbar">
+    <header class="topbar" id="topbar">
       <div class="brand">
         <div class="brand-text">
+          <div id="pageKicker" class="brand-kicker">东莞 · 影院雷达</div>
           <div id="pageHeading" class="brand-title">新片</div>
           <div id="subMeta" class="brand-sub">
             <span id="brandDot" class="brand-dot"></span>
