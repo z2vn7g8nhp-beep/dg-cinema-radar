@@ -441,10 +441,21 @@ test('detectDynamicEvents catches 定档, 改档, 开票, and 开分 across Maoy
       { id: 30, nm: '开分大片', rt: '2026-11-18', statusLabel: '购票', sc: 9.2 }
     ],
     prevIntelMap: {
-      '30': { doubanScore: null, imdbScore: null, rtCriticsScore: null }
+      '30': {
+        matchVersion: INTEL_MATCH_VERSION,
+        checkedAt: '2026-11-18T10:00:00Z',
+        doubanScore: null,
+        imdbScore: null,
+        rtCriticsScore: null
+      }
     },
     currIntelMap: {
-      '30': { doubanScore: 8.3, imdbScore: 8.1, rtCriticsScore: 91 }
+      '30': {
+        matchVersion: INTEL_MATCH_VERSION,
+        doubanScore: 8.3,
+        imdbScore: 8.1,
+        rtCriticsScore: 91
+      }
     },
     prevCinemaMovieIds: new Set(),
     currCinemaMovieIds: new Set([20])
@@ -683,7 +694,9 @@ test('detectDynamicEvents ignores historical backfill, re-releases, first-time i
       '103': { id: 103, nm: '疾速追杀', rt: '2026-11-20', statusLabel: '热映', sc: 0 },
       '104': { id: 104, nm: '版本升级电影', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
       '105': { id: 105, nm: '首次入库片', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
-      '106': { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '预售', sc: 0 }
+      '106': { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '预售', sc: 0 },
+      '107': { id: 107, nm: '淘票票占位片', rt: '2026-11-07', statusLabel: '热映', sc: 0 },
+      '108': { id: 108, nm: '待重检未检查片', rt: '2026-11-18', statusLabel: '热映', sc: 0 }
     },
     currMovies: [
       { id: 101, nm: '老片回填', rt: '2026-10-01', statusLabel: '热映', sc: 8.8 },
@@ -691,14 +704,18 @@ test('detectDynamicEvents ignores historical backfill, re-releases, first-time i
       { id: 103, nm: '疾速追杀', rt: '2026-11-20', statusLabel: '热映', sc: 0 },
       { id: 104, nm: '版本升级电影', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
       { id: 105, nm: '首次入库片', rt: '2026-11-18', statusLabel: '热映', sc: 0 },
-      { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '购票', sc: 0 }
+      { id: 106, nm: '深度安静', rt: '2026-11-19', statusLabel: '购票', sc: 0 },
+      { id: 107, nm: '淘票票占位片', rt: '2026-11-07', statusLabel: '热映', sc: 0 },
+      { id: 108, nm: '待重检未检查片', rt: '2026-11-18', statusLabel: '热映', sc: 0 }
     ],
     prevIntelMap: {
-      '101': { matchVersion: 3, doubanScore: null },
-      '102': { matchVersion: 3, doubanScore: null },
-      '103': { matchVersion: 3, doubanScore: null },
-      '104': { matchVersion: 1, doubanScore: null },
-      '106': { matchVersion: 3, doubanYear: 2025, doubanScore: null, imdbScore: null }
+      '101': { matchVersion: 3, checkedAt: '2026-11-18T14:00:00Z', doubanScore: null },
+      '102': { matchVersion: 3, checkedAt: '2026-11-18T14:00:00Z', doubanScore: null },
+      '103': { matchVersion: 3, checkedAt: '2026-11-18T14:00:00Z', doubanScore: null },
+      '104': { matchVersion: 1, checkedAt: '2026-11-18T14:00:00Z', doubanScore: null },
+      '106': { matchVersion: 3, checkedAt: '2026-11-18T14:00:00Z', doubanYear: 2025, doubanScore: null, imdbScore: null },
+      '107': { movieId: 107, tppId: 1651220, enm: 'BACK HOME' },
+      '108': { matchVersion: 1, doubanScore: null }
     },
     currIntelMap: {
       '101': { matchVersion: 3, doubanScore: 7.9, imdbScore: 7.6 },
@@ -706,7 +723,9 @@ test('detectDynamicEvents ignores historical backfill, re-releases, first-time i
       '103': { matchVersion: 3, doubanYear: 2014, doubanScore: 7.8, imdbScore: 7.5 },
       '104': { matchVersion: 3, doubanScore: 7.4, rtCriticsScore: 80 },
       '105': { matchVersion: 3, doubanScore: 8.1, imdbScore: 7.8 },
-      '106': { matchVersion: 3, doubanYear: 2025, doubanScore: 7.3, imdbScore: 7.1 }
+      '106': { matchVersion: 3, doubanYear: 2025, doubanScore: 7.3, imdbScore: 7.1 },
+      '107': { matchVersion: 3, checkedAt: '2026-11-18T15:00:00Z', imdbScore: 5.8 },
+      '108': { matchVersion: 3, checkedAt: '2026-11-18T15:00:00Z', doubanScore: 7.5 }
     },
     prevCinemaMovieIds: new Set(),
     currCinemaMovieIds: new Set()
@@ -1009,4 +1028,119 @@ test('fetchDoubanIntel accepts delayed mainland imports and bilingual+year match
     fetchImpl: mockDouban
   });
   assert.equal(shaun.doubanId, '37344902');
+});
+
+test('v5 dynamics fixes suppress onInfo/today scheduled, clean v4 artifacts, block domestic 2-word IMDb false hits, and prioritize date-drifted intel refresh', async () => {
+  // 1. detectDynamicEvents suppresses 定档 for onInfo or release-day movies while keeping genuine future coming movies
+  const dyn = detectDynamicEvents({
+    baselineReady: true,
+    todayStr: '2026-11-19',
+    nowIso: '2026-11-19T05:00:00Z',
+    prevCatalogMap: {},
+    currMovies: [
+      { id: 1366184, nm: '深度安静', rt: '2026-11-19', source: 'onInfo', statusLabel: '热映' },
+      { id: 9001, nm: '当日空降片', rt: '2026-11-19', source: 'coming', statusLabel: '想看' },
+      { id: 9002, nm: '真正新定档片', rt: '2026-12-25', source: 'coming', comingTitle: '12月25日 周五', statusLabel: '想看' }
+    ]
+  });
+  assert.deepEqual(
+    dyn.filter((e) => e.type === 'scheduled').map((e) => e.movieId),
+    [9002]
+  );
+
+  // 2. fetchImdbIntel rejects generic 2-word English-only IMDb hit on domestic film when Douban AKA disagrees, but allows AKA-confirmed 2-word hit
+  const mockImdb = async (url) => {
+    const u = decodeURIComponent(String(url));
+    if (u.includes('BACK HOME')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt37660891', l: 'Back Home', y: 2025, qid: 'movie', s: 'Anong Houngheuangsy' }] }), { status: 200 });
+    }
+    if (u.includes('The Uniform')) {
+      return new Response(JSON.stringify({ d: [{ id: 'tt33708235', l: 'The Uniform', y: 2024, qid: 'movie', s: 'Buffy Chen' }] }), { status: 200 });
+    }
+    if (u.includes('agregarr')) {
+      return new Response(JSON.stringify([{ rating: 6.9, votes: 158 }]), { status: 200 });
+    }
+    return new Response(JSON.stringify({ d: [] }), { status: 200 });
+  };
+
+  const backHomeRes = await fetchImdbIntel({
+    title: '乡归',
+    enm: 'BACK HOME',
+    akaList: ['Go Back to the South'],
+    year: 2025,
+    allowedYears: [2025, 2026],
+    dir: '徐晓晖',
+    fetchImpl: mockImdb
+  });
+  assert.equal(backHomeRes, null);
+
+  const uniformRes = await fetchImdbIntel({
+    title: '喜欢了你一整个青春',
+    enm: 'The Uniform',
+    akaList: ['The Uniform'],
+    year: 2024,
+    allowedYears: [2024, 2026],
+    dir: '庄景燊',
+    fetchImpl: mockImdb
+  });
+  assert.equal(uniformRes.imdbId, 'tt33708235');
+
+  // 3. resolveBaselineDynamics cleans v4 artifacts while preserving genuine 改档 / 开票 and resetting v < 4
+  assert.deepEqual(
+    resolveBaselineDynamics({
+      dynamicsVersion: 3,
+      dynamics: [{ id: 'dyn_resch_1608228_2026-11-27_2027-01-15', type: 'rescheduled' }]
+    }),
+    []
+  );
+  const migrated = resolveBaselineDynamics({
+    dynamicsVersion: 4,
+    dynamics: [
+      { id: 'dyn_score_1601225_IMDb 5.8', type: 'scored', createdAt: '2026-11-19T04:46:24.861Z' },
+      { id: 'dyn_resch_1608228_2026-11-27_2027-01-15', type: 'rescheduled', createdAt: '2026-11-19T04:41:30.488Z' },
+      { id: 'dyn_sch_1672717_2026-12-05', type: 'scheduled', createdAt: '2026-11-19T04:14:19.276Z' },
+      { id: 'dyn_open_1366184_2026-11-19', type: 'presale_opened', createdAt: '2026-11-18T19:32:24.801Z' },
+      { id: 'dyn_sch_999999_2027-02-01', type: 'scheduled', createdAt: '2026-11-19T05:00:00.000Z' }
+    ]
+  });
+  assert.deepEqual(
+    migrated.map((d) => d.id),
+    [
+      'dyn_resch_1608228_2026-11-27_2027-01-15',
+      'dyn_open_1366184_2026-11-19',
+      'dyn_sch_999999_2027-02-01'
+    ]
+  );
+
+  // 4. selectMoviesForIntelEnrichment prioritizes date-drifted rescheduled movies even within 60m cooldown
+  const selected = selectMoviesForIntelEnrichment({
+    catalogMovies: [
+      { id: 1608228, nm: '肆条', source: 'coming', rt: '2027-01-15', wish: 883 },
+      { id: 5555, nm: '刚查过远期片', source: 'coming', rt: '2027-02-01', wish: 50000 }
+    ],
+    intelMap: {
+      '1608228': {
+        matchVersion: INTEL_MATCH_VERSION,
+        enm: 'Life Begins At Forty',
+        origRt: '2026-11-27',
+        pubDesc: '2026-11-27中国大陆上映',
+        doubanScore: 7.2,
+        imdbScore: 6.5,
+        rtCriticsScore: 80,
+        checkedAt: '2026-11-19T04:55:00Z'
+      },
+      '5555': {
+        matchVersion: INTEL_MATCH_VERSION,
+        enm: 'Other',
+        origRt: '2027-02-01',
+        pubDesc: '2027-02-01中国大陆上映',
+        checkedAt: '2026-11-19T04:55:00Z'
+      }
+    },
+    activeWatchItems: [],
+    nowIso: '2026-11-19T05:00:00Z',
+    todayStr: '2026-11-19',
+    maxBudget: 5
+  });
+  assert.deepEqual(selected.map((m) => m.id), [1608228]);
 });

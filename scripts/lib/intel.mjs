@@ -67,6 +67,14 @@ function hasLatinLetters(s = '') {
   return /[a-zA-Z]/.test(String(s || ''));
 }
 
+export function isLikelyDomesticDirector(dir = '') {
+  const parts = String(dir || '')
+    .split(/[,，/、]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length > 0 && parts.every((d) => /^[\u4e00-\u9fff]{2,3}$/.test(d));
+}
+
 function normalizePersonNames(raw = '') {
   return String(raw || '')
     .split(/[,，/、]+/)
@@ -368,7 +376,13 @@ export async function fetchImdbIntel({
       new Set([year, ...allowedYears].map((y) => Number(y)).filter((y) => y >= 1900 && y <= 2100))
     );
     const hasChineseDir = /[\u4e00-\u9fff]/.test(String(dir || ''));
-    const isSingleWordEn = enQuery ? tokenizeLatin(enQuery).length <= 1 : true;
+    const isDomesticDir = isLikelyDomesticDirector(dir);
+    const enWordCount = enQuery ? tokenizeLatin(enQuery).length : 0;
+    const isSingleWordEn = enWordCount <= 1;
+    const akaLatinConfirmed = Boolean(
+      enQuery &&
+      (akaList || []).some((a) => hasLatinLetters(a) && scoreStrictTitleMatch(a, enQuery) >= 96)
+    );
     const zhPool = Array.from(new Set([title, ...zhTitles].filter((t) => /[\u4e00-\u9fff]/.test(String(t || '')))));
 
     let best = null;
@@ -412,6 +426,7 @@ export async function fetchImdbIntel({
         // English-only hit: block ambiguous 1-word titles on Chinese films (e.g. "Reset", "Crossing", "V") unless exact zh hit
         if (base < 95) continue;
         if (isSingleWordEn && (hasChineseDir || yearsPool.length === 0)) continue;
+        if (enWordCount <= 2 && isDomesticDir && !akaLatinConfirmed) continue;
         if (isSingleWordEn && candYear && yearsPool.length > 0) {
           const minDiff = Math.min(...yearsPool.map((y) => Math.abs(candYear - y)));
           if (minDiff > 1) continue;

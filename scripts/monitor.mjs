@@ -14,13 +14,20 @@ import { CINEMAS, CINEMA_MAP, getBeijingDateStr, shiftDateStr } from './lib/conf
 import { fetchCinemaDetail, fetchMaoyanMovieDetail, fetchMoreComingByIds, fetchMovieCatalog, jitterDelay, sleep } from './lib/maoyan.mjs';
 import { fetchTaopiaopiaoCatalog, matchTaopiaopiaoMovie } from './lib/taopiaopiao.mjs';
 import { buildConsolidatedAlert, computeBackoffMinutes, diffWatchlistRound } from './lib/radar.mjs';
-import { INTEL_MATCH_VERSION, enrichMovieIntel } from './lib/intel.mjs';
+import {
+  INTEL_MATCH_VERSION,
+  enrichMovieIntel,
+  isLikelyDomesticDirector,
+  scoreStrictTitleMatch,
+  tokenizeLatin
+} from './lib/intel.mjs';
 import {
   attachWishGrowth,
   buildDynamicsAlert,
   dedupeCatalogMovies,
   detectDynamicEvents,
   isConcreteDate,
+  resolveEffectiveIntelDate,
   updateWishSnapshots
 } from './lib/dynamics.mjs';
 import { readPrivateGist, updatePrivateGist } from './lib/gist.mjs';
@@ -28,14 +35,26 @@ import { dispatchAlerts } from './lib/notifier.mjs';
 
 const STATE_OUT_PATH = process.env.STATE_OUT_PATH || path.resolve('data/state.json');
 const CATALOG_REFRESH_INTERVAL_MIN = 4.8;
-export const DYNAMICS_EPOCH_VERSION = 4;
+export const DYNAMICS_EPOCH_VERSION = 5;
 export const CATALOG_SCHEMA_VERSION = 2;
 
 export function resolveBaselineDynamics(prevPublic) {
-  if (Number(prevPublic?.dynamicsVersion || 1) < DYNAMICS_EPOCH_VERSION) {
+  const prevVer = Number(prevPublic?.dynamicsVersion || 1);
+  const list = Array.isArray(prevPublic?.dynamics) ? prevPublic.dynamics : [];
+  if (prevVer < 4) {
     return [];
   }
-  return Array.isArray(prevPublic?.dynamics) ? prevPublic.dynamics : [];
+  if (prevVer < DYNAMICS_EPOCH_VERSION) {
+    // One-time v4 -> v5 cleanup: remove pre-fix (before baee79d at 04:41Z) pagination-hole `scheduled` artifacts
+    // and the Taopiaopiao-stub/false-IMDb `乡归` scored entry, while preserving genuine 改档/开票 events.
+    return list.filter((d) => {
+      if (!d) return false;
+      if (d.type === 'scheduled' && String(d.createdAt || '') < '2026-11-19T04:41:00.000Z') return false;
+      if (d.id === 'dyn_score_1601225_IMDb 5.8') return false;
+      return true;
+    });
+  }
+  return list;
 }
 
 async function readExistingPublicState() {
@@ -119,6 +138,8 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
     const ageMin = prev?.checkedAt ? minutesBetween(prev.checkedAt, nowIso) : Infinity;
     const isStarred = starredIds.has(Number(m.id));
     const rt = String(m.rt || '').trim();
+    const intelDate = resolveEffectiveIntelDate(prev);
+    const dateDrifted = Boolean(isConcreteDate(rt) && intelDate && rt !== intelDate);
     const isNearRelease = Boolean(
       windowStart &&
       windowEnd &&
@@ -138,6 +159,7 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
     const eligible =
       needsV2Upgrade ||
       neverChecked ||
+      dateDrifted ||
       (isInHotWindow && ((missingKeyScore && ageMin >= 4.5) || ageMin >= 180)) ||
       (isStarred && ageMin >= 60) ||
       (!isInHotWindow && !isStarred && ((missingKeyScore && ageMin >= 360) || ageMin >= 1440));
@@ -146,6 +168,7 @@ export function selectMoviesForIntelEnrichment({ catalogMovies, intelMap, active
       const cappedAgeMin = Number.isFinite(ageMin) ? Math.min(ageMin, 1440) : 1440;
       const priorityScore =
         (needsV2Upgrade ? 500_000 : 0) +
+        (dateDrifted ? 400_000 : 0) +
         (neverChecked ? 350_000 : 0) +
         (isInHotWindow && isStarred ? 250_000 : 0) +
         (isInHotWindow ? 150_000 : 0) +
@@ -500,7 +523,34 @@ async function main() {
       for (const [k, v] of Object.entries(nextIntelMap)) {
         if (!keepIds.has(k) || !v) continue;
         if (v.matchVersion === INTEL_MATCH_VERSION) {
-          prunedIntel[k] = v;
+          const hasLatinDoubanAka = Array.isArray(v.doubanAka) && v.doubanAka.some((a) => /[a-zA-Z]/.test(String(a)));
+          const enmConfirmedByDouban =
+            hasLatinDoubanAka &&
+            v.doubanAka.some((a) => /[a-zA-Z]/.test(String(a)) && scoreStrictTitleMatch(a, v.enm || '') >= 96);
+          const isSuspiciousDomesticImdb = Boolean(
+            v.imdbId &&
+            v.doubanMetaLoaded &&
+            hasLatinDoubanAka &&
+            !enmConfirmedByDouban &&
+            isLikelyDomesticDirector(v.dir) &&
+            tokenizeLatin(v.enm || '').length <= 2 &&
+            scoreStrictTitleMatch(v.imdbTitle || '', v.enm || '') >= 96
+          );
+          if (isSuspiciousDomesticImdb) {
+            const { checkedAt: _dropCheckedAt, ...restV } = v;
+            prunedIntel[k] = {
+              ...restV,
+              imdbId: '',
+              imdbUrl: '',
+              imdbScore: null,
+              imdbVotes: 0,
+              imdbTitle: '',
+              imdbYear: null,
+              imdbActors: ''
+            };
+          } else {
+            prunedIntel[k] = v;
+          }
         } else {
           // Keep verified Maoyan & Douban metadata while re-verifying IMDb/RT under strict v3 bilingual Pinyin rules
           prunedIntel[k] = {
@@ -572,7 +622,12 @@ async function main() {
         const key = String(targetMovie.id);
         const prevEntry = nextIntelMap[key] || {};
         const prevAgeMin = prevEntry.checkedAt ? minutesBetween(prevEntry.checkedAt, nowIso) : Infinity;
+        const prevIntelDate = resolveEffectiveIntelDate(prevEntry);
+        const dateDrifted = Boolean(
+          isConcreteDate(targetMovie.rt) && prevIntelDate && String(targetMovie.rt).trim() !== prevIntelDate
+        );
         const forceDetailRefresh =
+          dateDrifted ||
           (activeStarIdSet.has(Number(targetMovie.id)) && prevAgeMin >= 55) ||
           (targetMovie.source === 'onInfo' && !(prevEntry.maoyanScore > 0) && prevAgeMin >= 25);
         recheckedIds.add(Number(targetMovie.id));

@@ -205,7 +205,7 @@ export function detectDynamicEvents({
 
     // 1. 定档 (scheduled) & 2. 改档 / 撤档 (rescheduled)
     if (!hadKnownBaseline) {
-      if (!suppressNewAdditions && isConcreteDate(currRt) && currRt >= todayStr) {
+      if (!suppressNewAdditions && curr.source !== 'onInfo' && isConcreteDate(currRt) && currRt > todayStr) {
         events.push({
           id: `dyn_sch_${id}_${currRt}`,
           type: 'scheduled',
@@ -219,7 +219,7 @@ export function detectDynamicEvents({
         });
       }
     } else {
-      if (!isConcreteDate(prevRt) && isConcreteDate(currRt) && !matchesComingTitleMonthDay(currRt, prev?.comingTitle)) {
+      if (!isConcreteDate(prevRt) && isConcreteDate(currRt) && currRt >= todayStr && !matchesComingTitleMonthDay(currRt, prev?.comingTitle)) {
         events.push({
           id: `dyn_sch_${id}_${currRt}`,
           type: 'scheduled',
@@ -295,7 +295,12 @@ export function detectDynamicEvents({
     // 4. 开分 (scored across 猫眼 / 豆瓣 / IMDb / 烂番茄 — strictly fresh/upcoming transitions after baseline, never backfill)
     const currInt = currIntelMap[key] || {};
     const canEmitScore = isEligibleForScoreOpening(curr, currRt, prevInt, currInt, todayStr);
-    const hadIntelBefore = Boolean(prevIntelMap[key]);
+    const hadCheckedIntelBefore = Boolean(
+      prevInt?.checkedAt &&
+      prevInt.matchVersion &&
+      currInt?.matchVersion &&
+      prevInt.matchVersion === currInt.matchVersion
+    );
     const openedScores = [];
 
     const prevMaoyan = Number(prev?.sc || prevInt.maoyanScore || 0);
@@ -304,15 +309,15 @@ export function detectDynamicEvents({
       openedScores.push(`猫眼 ${currMaoyan}`);
     }
 
-    if (canEmitScore && hadIntelBefore && !(prevInt.doubanScore > 0) && currInt.doubanScore > 0) {
+    if (canEmitScore && hadCheckedIntelBefore && !(prevInt.doubanScore > 0) && currInt.doubanScore > 0) {
       openedScores.push(`豆瓣 ${currInt.doubanScore}`);
     }
-    if (canEmitScore && hadIntelBefore && !(prevInt.imdbScore > 0) && currInt.imdbScore > 0) {
+    if (canEmitScore && hadCheckedIntelBefore && !(prevInt.imdbScore > 0) && currInt.imdbScore > 0) {
       openedScores.push(`IMDb ${currInt.imdbScore}`);
     }
     if (
       canEmitScore &&
-      hadIntelBefore &&
+      hadCheckedIntelBefore &&
       (prevInt.rtCriticsScore === null || prevInt.rtCriticsScore === undefined) &&
       currInt.rtCriticsScore !== null &&
       currInt.rtCriticsScore !== undefined
